@@ -57,15 +57,14 @@ def init(name: str):
     (wiki_dir / "reports").mkdir(exist_ok=True)
     (wiki_dir / "_meta").mkdir(exist_ok=True)
 
-    # Copy AGENTS.md template
-    template = Path(__file__).parent / "prompts" / "agents_template.md"
-    agents_dest = wiki_dir / "AGENTS.md"
-    if not agents_dest.exists():
-        agents_dest.write_text(template.read_text("utf-8"), encoding="utf-8")
-
-    # Create default config
+    # Create .klore/ config dir and copy agents.md template
     config_dir = project_dir / ".klore"
     config_dir.mkdir(exist_ok=True)
+
+    template = Path(__file__).parent / "prompts" / "agents_template.md"
+    agents_dest = config_dir / "agents.md"
+    if not agents_dest.exists():
+        agents_dest.write_text(template.read_text("utf-8"), encoding="utf-8")
     config_path = config_dir / "config.json"
     if not config_path.exists():
         config_path.write_text(

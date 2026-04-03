@@ -38,9 +38,9 @@ def _read_prompt(name: str) -> str:
     return (PROMPTS_DIR / name).read_text("utf-8")
 
 
-def _read_agents_md(wiki_dir: Path) -> str:
-    """Read the AGENTS.md schema file, returning empty string if absent."""
-    agents_path = wiki_dir / "AGENTS.md"
+def _read_agents_md(project_dir: Path) -> str:
+    """Read the agents.md schema file from .klore/, returning empty string if absent."""
+    agents_path = project_dir / ".klore" / "agents.md"
     if agents_path.is_file():
         return agents_path.read_text("utf-8")
     return ""
@@ -602,13 +602,13 @@ async def compile_wiki(project_dir: Path, full: bool = False) -> dict:
 
     # Load state and agents
     state = CompileState.load(wiki_dir)
-    agents_md = _read_agents_md(wiki_dir)
+    agents_md = _read_agents_md(project_dir)
     prompt_hash = _compute_prompt_hash(agents_md)
 
     # Check if full recompile needed due to prompt changes
     if state.needs_full_recompile(prompt_hash):
         click.echo(
-            "Prompts or AGENTS.md changed — forcing full recompile.", err=True
+            "Prompts or agents.md changed — forcing full recompile.", err=True
         )
         full = True
     state.set_prompt_hash(prompt_hash)

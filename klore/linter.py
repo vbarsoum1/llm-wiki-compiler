@@ -22,7 +22,7 @@ def _strip_code_fences(text: str) -> str:
 SKIP_DIRS = {"_meta"}
 WIKI_SUBDIRS = ["sources", "concepts", "reports"]
 FALLBACK_SUBDIRS = ["concepts"]
-TOP_LEVEL_FILES = ["INDEX.md", "AGENTS.md"]
+TOP_LEVEL_FILES = ["INDEX.md"]
 
 
 def _collect_wiki_content(wiki_dir: Path, include_sources: bool = True) -> str:
@@ -68,7 +68,8 @@ def lint(project_dir: Path) -> str:
         Path(__file__).parent / "prompts" / "lint.md"
     ).read_text(encoding="utf-8")
 
-    agents_md = (wiki_dir / "AGENTS.md").read_text(encoding="utf-8") if (wiki_dir / "AGENTS.md").is_file() else ""
+    agents_path = project_dir / ".klore" / "agents.md"
+    agents_md = agents_path.read_text(encoding="utf-8") if agents_path.is_file() else ""
 
     estimated_tokens = len(wiki_content) // 4
     if estimated_tokens > max_tokens:

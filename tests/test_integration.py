@@ -259,8 +259,8 @@ class TestInit:
         assert "fast" in config["model"]
         assert "strong" in config["model"]
 
-        # AGENTS.md
-        assert (project_dir / "wiki" / "AGENTS.md").is_file()
+        # agents.md schema
+        assert (project_dir / ".klore" / "agents.md").is_file()
 
         # Git repository
         assert (project_dir / ".git").is_dir()

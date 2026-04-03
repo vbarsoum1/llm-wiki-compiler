@@ -1,4 +1,4 @@
-# AGENTS.md — Wiki Schema & Conventions
+# Wiki Schema & Conventions
 
 This file defines the structure, formatting, and rules for the compiled wiki.
 The LLM reads this file before every compilation pass. Edit it to customize

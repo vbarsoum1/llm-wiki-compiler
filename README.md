@@ -154,13 +154,14 @@ my-research/
 │   ├── article.md
 │   └── diagram.png
 ├── wiki/                    # Compiled output (Obsidian-compatible)
-│   ├── AGENTS.md            # Wiki schema (editable)
 │   ├── INDEX.md             # Master index
 │   ├── concepts/            # Synthesized concept articles
 │   ├── sources/             # Per-source summaries
 │   ├── reports/             # Saved Q&A answers
 │   └── _meta/               # Compilation state, link graph
-├── .klore/config.json       # Configuration
+├── .klore/
+│   ├── config.json          # Model and API configuration
+│   └── agents.md            # Wiki schema — controls how sources are compiled (editable)
 └── .git/                    # Auto-initialized, wiki changes tracked
 ```
 

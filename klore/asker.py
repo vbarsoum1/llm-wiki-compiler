@@ -30,7 +30,7 @@ def _load_wiki_files(wiki_dir: Path, full: bool = True) -> str:
     """Concatenate wiki markdown files into a single string.
 
     When *full* is True every .md file is included.  When False (fallback mode)
-    only AGENTS.md, INDEX files, and concept articles are loaded — individual
+    only INDEX files and concept articles are loaded — individual
     source summaries under sources/ are skipped.
     """
     parts: list[str] = []
@@ -43,7 +43,7 @@ def _load_wiki_files(wiki_dir: Path, full: bool = True) -> str:
             rel = md_path.relative_to(wiki_dir)
             in_sources = rel.parts[0] == "sources" if rel.parts else False
             is_index = rel.name.upper() == "INDEX.MD"
-            # In fallback mode keep AGENTS.md, any INDEX file, and concepts/.
+            # In fallback mode keep any INDEX file and concepts/.
             if in_sources and not is_index:
                 continue
 
@@ -76,8 +76,8 @@ def ask(project_dir: Path, question: str, save: bool = False) -> str:
         )
         wiki_content = _load_wiki_files(wiki_dir, full=False)
 
-    # --- 2. Read AGENTS.md for the prompt schema section -------------------
-    agents_path = wiki_dir / "AGENTS.md"
+    # --- 2. Read agents.md for the prompt schema section --------------------
+    agents_path = project_dir / ".klore" / "agents.md"
     agents_md = agents_path.read_text(encoding="utf-8") if agents_path.exists() else ""
 
     # --- 3. Build the prompt -----------------------------------------------
