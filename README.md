@@ -10,26 +10,96 @@ Drop PDFs, articles, and images into a folder. Klore compiles them into a struct
 
 **The thesis:** RAG retrieves fragments. Klore compiles knowledge. With 1M+ token context windows, the compiled wiki IS the index.
 
-## Quickstart
+## Getting Started
+
+### 1. Install
 
 ```bash
-pip install klore
+# Clone the repo
+git clone https://github.com/vbarsoum1/klore.git
+cd klore
 
-export OPENROUTER_API_KEY="your-key-here"
-
-klore init my-research
-cd my-research
-
-klore add ~/papers/attention-is-all-you-need.pdf
-klore add ~/papers/scaling-laws.pdf
-klore add https://karpathy.ai/zero-to-hero.html
-
-klore compile
-
-klore ask "What is the relationship between model scale and attention mechanisms?"
+# Create a virtual environment and install
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
-Then open `wiki/` in Obsidian and browse the graph.
+### 2. Get an API key
+
+Klore uses [OpenRouter](https://openrouter.ai) for LLM access. Get a free API key at https://openrouter.ai/keys, then:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
+```
+
+### 3. Create a knowledge base
+
+```bash
+klore init my-research
+cd my-research
+```
+
+This creates the directory structure: `raw/` for your sources, `wiki/` for the compiled output, and `.klore/` for config.
+
+### 4. Add sources
+
+Add any mix of local files and URLs:
+
+```bash
+# Local files (PDF, markdown, HTML, images, DOCX, etc.)
+klore add ~/papers/attention-is-all-you-need.pdf
+klore add ~/notes/research-notes.md
+
+# URLs (articles, blog posts, web pages)
+klore add https://en.wikipedia.org/wiki/Transformer_(deep_learning_model)
+```
+
+Check what you've added:
+```bash
+klore status
+```
+
+### 5. Compile the wiki
+
+```bash
+klore compile
+```
+
+This runs the three-pass compiler: source extraction, tag normalization, concept synthesis, and index generation. You'll see progress output for each pass.
+
+### 6. Browse the wiki
+
+Open the `wiki/` folder in [Obsidian](https://obsidian.md/) as a vault. You'll see:
+- `wiki/sources/` — one summary per source with key claims and provenance
+- `wiki/concepts/` — synthesized concept articles linking multiple sources
+- `wiki/INDEX.md` — master index of everything
+- Graph view shows all the cross-links between concepts and sources
+
+Or just read the markdown files directly — they're plain `.md`.
+
+### 7. Ask questions
+
+```bash
+klore ask "What are the key findings across these sources?"
+```
+
+The answer cites specific sources using `[[wikilinks]]`. Save an answer to the wiki:
+
+```bash
+klore ask --save "Compare the approaches described in these papers"
+```
+
+### 8. Keep it growing
+
+Add more sources anytime. Klore compiles incrementally — only new or changed sources are reprocessed:
+
+```bash
+klore add another-paper.pdf
+klore compile          # only processes the new file
+klore lint             # check for contradictions, broken links
+klore diff --since 1w  # see what changed in the wiki this week
+```
 
 ## How it works
 
