@@ -40,8 +40,10 @@ def test_load_empty_state(tmp_path: Path) -> None:
 
     assert state.file_hashes == {}
     assert state.concept_sources == {}
+    assert state.entity_sources == {}
     assert state.prompt_hash is None
     assert state.last_compiled is None
+    assert state.compilation_count == 0
 
 
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
@@ -49,6 +51,7 @@ def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     state = CompileState()
     state.file_hashes = {"raw/paper.pdf": "abc123", "raw/notes.md": "def456"}
     state.concept_sources = {"quantum": ["paper", "notes"], "gravity": ["paper"]}
+    state.entity_sources = {"einstein": ["paper"], "bohr": ["paper", "notes"]}
     state.prompt_hash = "prompt_hash_value"
 
     state.save(tmp_path)
@@ -56,8 +59,10 @@ def test_save_and_load_roundtrip(tmp_path: Path) -> None:
 
     assert loaded.file_hashes == state.file_hashes
     assert loaded.concept_sources == state.concept_sources
+    assert loaded.entity_sources == state.entity_sources
     assert loaded.prompt_hash == state.prompt_hash
     assert loaded.last_compiled is not None
+    assert loaded.compilation_count == 1
 
 
 def test_diff_finds_new_files(tmp_path: Path) -> None:
@@ -138,3 +143,31 @@ def test_get_affected_concepts() -> None:
 
     affected_single = state.get_affected_concepts(["paper4"])
     assert affected_single == {"optics"}
+
+
+def test_get_affected_entities() -> None:
+    """Returns the correct set of entities for changed sources."""
+    state = CompileState()
+    state.entity_sources = {
+        "einstein": ["paper1", "paper2"],
+        "bohr": ["paper2", "paper3"],
+        "feynman": ["paper4"],
+    }
+
+    affected = state.get_affected_entities(["paper2"])
+    assert affected == {"einstein", "bohr"}
+
+    affected_none = state.get_affected_entities(["paper99"])
+    assert affected_none == set()
+
+
+def test_compilation_count_increments(tmp_path: Path) -> None:
+    """Each save increments compilation_count."""
+    state = CompileState()
+    assert state.compilation_count == 0
+
+    state.save(tmp_path)
+    assert state.compilation_count == 1
+
+    state.save(tmp_path)
+    assert state.compilation_count == 2

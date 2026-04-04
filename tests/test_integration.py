@@ -1,6 +1,7 @@
 """Integration tests for the full Klore init -> add -> compile -> ask loop.
 
 Mocks all LLM calls via klore.models.get_client so no real API key is needed.
+Tests the seven-step director-driven compilation pipeline.
 """
 
 from __future__ import annotations
@@ -19,6 +20,27 @@ from klore.compiler import compile_wiki
 
 # ── Canned LLM Responses ───────────────────────────────────────────
 
+# Step 2: Director editorial brief (JSON)
+EDITORIAL_BRIEF_RESPONSE = json.dumps({
+    "summary": "A test paper about transformers and machine learning.",
+    "key_takeaways": ["Transformers outperform RNNs"],
+    "novelty": "Demonstrates transformer superiority",
+    "contradictions": [],
+    "emphasis": "Focus on transformer architecture",
+    "entities": [],
+    "concepts": [
+        {
+            "name": "machine-learning",
+            "action": "create",
+            "what_to_add": "Transformer evidence",
+        }
+    ],
+    "existing_pages_to_update": [],
+    "questions_raised": [],
+    "suggested_sources": [],
+})
+
+# Step 4a: Source summary (markdown with frontmatter)
 SOURCE_SUMMARY_RESPONSE = """\
 ---
 title: "Test Paper"
@@ -47,6 +69,7 @@ This is a test paper about machine learning and transformers.
 - [[transformers]] — architecture discussed
 """
 
+# Step 3: Tag normalization (JSON)
 TAG_NORMALIZATION_RESPONSE = json.dumps(
     {
         "machine-learning": "machine-learning",
@@ -55,6 +78,7 @@ TAG_NORMALIZATION_RESPONSE = json.dumps(
     }
 )
 
+# Step 4c: Concept article (markdown with frontmatter)
 CONCEPT_ARTICLE_RESPONSE = """\
 ---
 title: "Machine Learning"
@@ -77,6 +101,14 @@ According to [[test-paper]], transformers outperform RNNs.
 - [[test-paper]] — discusses ML approaches
 """
 
+# Step 5: Director review (JSON)
+DIRECTOR_REVIEW_RESPONSE = json.dumps({
+    "approved": True,
+    "issues": [],
+    "editorial_notes": "Build looks good.",
+})
+
+# Step 6: Index (markdown)
 INDEX_RESPONSE = """\
 # Knowledge Base Index
 
@@ -85,13 +117,39 @@ INDEX_RESPONSE = """\
 ## Concepts
 
 ### Machine Learning
-- [[machine-learning]] — ML fundamentals
+- machine-learning — ML fundamentals
 
 ## Sources
 
-- [[test-paper]] — Test Paper (2026-04-02)
+- test-paper — Test Paper (2026-04-02)
 """
 
+# Step 7: Director overview (markdown)
+OVERVIEW_RESPONSE = """\
+# Overview
+
+## Synthesis
+This knowledge base covers machine learning and transformers.
+
+## Key Themes
+### Machine Learning
+Core topic across sources.
+
+## Open Questions
+- How do transformers scale?
+"""
+
+# Asker: Director query plan (JSON)
+QUERY_PLAN_RESPONSE = json.dumps({
+    "relevant_pages": ["sources/test-paper", "concepts/machine-learning"],
+    "strategy": "simple",
+    "emphasis": "Focus on transformer findings",
+    "gaps": [],
+    "should_file": False,
+    "reasoning": "Direct lookup from source and concept pages.",
+})
+
+# Asker: Answer
 ASK_RESPONSE = (
     "Based on the wiki, [[test-paper]] discusses how transformers outperform "
     "RNNs on sequence tasks. The key finding from [[machine-learning]] is "
@@ -127,6 +185,25 @@ This is a second paper about optimization in machine learning.
 - [[optimization]] — optimizer comparison
 """
 
+EDITORIAL_BRIEF_RESPONSE_2 = json.dumps({
+    "summary": "A paper about optimization in machine learning.",
+    "key_takeaways": ["Adam optimizer converges faster than SGD"],
+    "novelty": "Optimizer comparison evidence",
+    "contradictions": [],
+    "emphasis": "Focus on optimizer convergence",
+    "entities": [],
+    "concepts": [
+        {
+            "name": "machine-learning",
+            "action": "update",
+            "what_to_add": "Optimization evidence",
+        }
+    ],
+    "existing_pages_to_update": [],
+    "questions_raised": [],
+    "suggested_sources": [],
+})
+
 
 # ── Mock Factory ────────────────────────────────────────────────────
 
@@ -136,6 +213,7 @@ def _make_mock_client(responses_by_keyword: dict[str, str]) -> MagicMock:
 
     The mock inspects *all* messages in the chat completion request and
     selects the first matching keyword found in the concatenated content.
+    Order matters — more specific keywords should come first.
     """
     mock_client = MagicMock()
     call_log: list[str] = []
@@ -165,6 +243,49 @@ def _make_mock_client(responses_by_keyword: dict[str, str]) -> MagicMock:
     return mock_client
 
 
+def _compiler_keywords() -> dict[str, str]:
+    """Return the keyword -> response mapping for the compiler pipeline.
+
+    Order matters: more-specific keywords must come first so they match
+    before less-specific ones.  Since agents.md content (which includes
+    the word "overview") is injected into nearly every prompt, keywords
+    must be specific enough to avoid false positives.
+    """
+    return {
+        # Step 5: Director review — system prompt unique phrase
+        "editorial director reviewing": DIRECTOR_REVIEW_RESPONSE,
+        # Step 7: Director overview — unique phrase from director_overview.md
+        "write or update the wiki's overview page": OVERVIEW_RESPONSE,
+        # Step 2: Director editorial brief — unique phrase from director_brief.md
+        "A new source has been added": EDITORIAL_BRIEF_RESPONSE,
+        # Step 4a: Source summary — heading in compile_source.md
+        "Source Document": SOURCE_SUMMARY_RESPONSE,
+        # Step 3: Tag normalize — system prompt unique phrase
+        "tag normalizer": TAG_NORMALIZATION_RESPONSE,
+        # Step 4c: Concept synthesis — phrase from compile_concept.md
+        "concept article": CONCEPT_ARTICLE_RESPONSE,
+        # Step 4b: Entity pages — phrase from compile_entity.md
+        "entity page": CONCEPT_ARTICLE_RESPONSE,
+        # Step 6: Index — phrase from compile_index.md
+        "master index": INDEX_RESPONSE,
+    }
+
+
+def _asker_keywords() -> dict[str, str]:
+    """Return the keyword -> response mapping for the asker pipeline."""
+    return {
+        # Director query plan
+        "plan how to answer": QUERY_PLAN_RESPONSE,
+        # Answer synthesis
+        "knowledge base assistant": ASK_RESPONSE,
+    }
+
+
+def _fake_get_model(tier: str, project_dir: Path) -> str:
+    """Return a fixed model name for all tiers."""
+    return "test-model"
+
+
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
@@ -180,24 +301,8 @@ def klore_project(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def mock_client() -> MagicMock:
-    """Return a mock OpenAI client wired with standard canned responses.
-
-    Keyword matching order matters: more specific keywords first so that
-    the correct response is selected when prompts contain multiple keywords.
-    """
-    # Order: most-specific keyword first
-    responses = {
-        "Source Document": SOURCE_SUMMARY_RESPONSE,
-        "compile_source": SOURCE_SUMMARY_RESPONSE,
-        "normalize": TAG_NORMALIZATION_RESPONSE,
-        "tag normalizer": TAG_NORMALIZATION_RESPONSE,
-        "Concept Synthesis": CONCEPT_ARTICLE_RESPONSE,
-        "concept article": CONCEPT_ARTICLE_RESPONSE,
-        "index": INDEX_RESPONSE,
-        "Question": ASK_RESPONSE,
-        "Answer": ASK_RESPONSE,
-    }
-    return _make_mock_client(responses)
+    """Return a mock OpenAI client wired with standard compiler responses."""
+    return _make_mock_client(_compiler_keywords())
 
 
 @pytest.fixture()
@@ -214,9 +319,14 @@ def compiled_project(
 
     with (
         patch("klore.compiler.get_client", return_value=mock_client),
-        patch("klore.compiler.get_model", return_value="test-model"),
+        patch(
+            "klore.compiler.get_model", side_effect=_fake_get_model
+        ),
         patch("klore.compiler.git_add_and_commit"),
-        patch("klore.compiler.convert_to_markdown", side_effect=_fake_convert),
+        patch(
+            "klore.compiler.convert_to_markdown",
+            side_effect=_fake_convert,
+        ),
     ):
         asyncio.run(compile_wiki(klore_project))
 
@@ -247,6 +357,7 @@ class TestInit:
         assert (project_dir / "wiki").is_dir()
         assert (project_dir / "wiki" / "sources").is_dir()
         assert (project_dir / "wiki" / "concepts").is_dir()
+        assert (project_dir / "wiki" / "entities").is_dir()
         assert (project_dir / "wiki" / "reports").is_dir()
         assert (project_dir / "wiki" / "_meta").is_dir()
 
@@ -258,6 +369,11 @@ class TestInit:
         assert "model" in config
         assert "fast" in config["model"]
         assert "strong" in config["model"]
+        assert "director" in config["model"]
+
+        # New files from director pipeline
+        assert (project_dir / "wiki" / "log.md").is_file()
+        assert (project_dir / "wiki" / "overview.md").is_file()
 
         # agents.md schema
         assert (project_dir / ".klore" / "agents.md").is_file()
@@ -267,7 +383,7 @@ class TestInit:
 
 
 class TestFullCompile:
-    """Tests for the three-pass compile pipeline."""
+    """Tests for the seven-step director-driven compilation pipeline."""
 
     def test_full_compile_loop(
         self, klore_project: Path, mock_client: MagicMock
@@ -284,7 +400,10 @@ class TestFullCompile:
 
         with (
             patch("klore.compiler.get_client", return_value=mock_client),
-            patch("klore.compiler.get_model", return_value="test-model"),
+            patch(
+                "klore.compiler.get_model",
+                side_effect=_fake_get_model,
+            ),
             patch("klore.compiler.git_add_and_commit"),
             patch(
                 "klore.compiler.convert_to_markdown",
@@ -293,12 +412,21 @@ class TestFullCompile:
         ):
             stats = asyncio.run(compile_wiki(klore_project))
 
-        # Pass 1: source summary written
+        # Step 4a: source summary written
         source_files = list((wiki_dir / "sources").glob("*.md"))
         assert len(source_files) >= 1, "Expected at least one source summary"
 
-        # Pass 3: INDEX.md generated
-        assert (wiki_dir / "INDEX.md").is_file()
+        # Step 6: index.md generated (lowercase, not INDEX.md)
+        assert (wiki_dir / "index.md").is_file()
+
+        # Step 7: overview.md written by Director
+        assert (wiki_dir / "overview.md").is_file()
+        overview_content = (wiki_dir / "overview.md").read_text("utf-8")
+        assert "Overview" in overview_content
+
+        # Log.md has entries from Step 6
+        log_content = (wiki_dir / "log.md").read_text("utf-8")
+        assert "ingest" in log_content
 
         # State persisted
         state_path = wiki_dir / "_meta" / "compile-state.json"
@@ -312,6 +440,10 @@ class TestFullCompile:
         assert tag_aliases_path.is_file()
         aliases = json.loads(tag_aliases_path.read_text("utf-8"))
         assert isinstance(aliases, dict)
+
+        # Link graph persisted
+        link_graph_path = wiki_dir / "_meta" / "link-graph.json"
+        assert link_graph_path.is_file()
 
         # Stats make sense
         assert stats["sources_processed"] >= 1
@@ -345,19 +477,20 @@ class TestIncrementalCompile:
         project_dir, _ = compiled_project
         raw_dir = project_dir / "raw"
 
-        # Record how many LLM calls the first compile used
-        # (we need a fresh mock to count calls for the second compile)
-        fresh_client = _make_mock_client(
-            {
-                "Source Document": SOURCE_SUMMARY_RESPONSE_2,
-                "compile_source": SOURCE_SUMMARY_RESPONSE_2,
-                "normalize": TAG_NORMALIZATION_RESPONSE,
-                "tag normalizer": TAG_NORMALIZATION_RESPONSE,
-                "Concept Synthesis": CONCEPT_ARTICLE_RESPONSE,
-                "concept article": CONCEPT_ARTICLE_RESPONSE,
-                "index": INDEX_RESPONSE,
-            }
-        )
+        # Build a fresh mock with second-source responses where needed.
+        # The editorial brief and source summary use the second paper;
+        # other steps reuse standard canned responses.
+        incremental_keywords = {
+            "editorial director reviewing": DIRECTOR_REVIEW_RESPONSE,
+            "write or update the wiki's overview page": OVERVIEW_RESPONSE,
+            "A new source has been added": EDITORIAL_BRIEF_RESPONSE_2,
+            "Source Document": SOURCE_SUMMARY_RESPONSE_2,
+            "tag normalizer": TAG_NORMALIZATION_RESPONSE,
+            "concept article": CONCEPT_ARTICLE_RESPONSE,
+            "entity page": CONCEPT_ARTICLE_RESPONSE,
+            "master index": INDEX_RESPONSE,
+        }
+        fresh_client = _make_mock_client(incremental_keywords)
 
         # Add a second raw file
         (raw_dir / "second-paper.md").write_text(
@@ -367,7 +500,10 @@ class TestIncrementalCompile:
 
         with (
             patch("klore.compiler.get_client", return_value=fresh_client),
-            patch("klore.compiler.get_model", return_value="test-model"),
+            patch(
+                "klore.compiler.get_model",
+                side_effect=_fake_get_model,
+            ),
             patch("klore.compiler.git_add_and_commit"),
             patch(
                 "klore.compiler.convert_to_markdown",
@@ -376,17 +512,20 @@ class TestIncrementalCompile:
         ):
             stats = asyncio.run(compile_wiki(project_dir, full=False))
 
-        # Only the new file should have been processed in Pass 1
+        # Only the new file should have been processed in Step 4a
         assert stats["sources_processed"] == 1
 
-        # The call log should contain exactly one Pass-1 call (the new file).
-        # Pass-1 calls contain "Source Document" in the prompt.
-        pass1_calls = [
-            c for c in fresh_client._call_log if "Source Document" in c
+        # The call log should contain exactly one editorial brief call
+        # (Step 2) for the new file. The director_brief.md prompt contains
+        # "A new source has been added".
+        editorial_calls = [
+            c
+            for c in fresh_client._call_log
+            if "a new source has been added" in c.lower()
         ]
-        assert len(pass1_calls) == 1, (
-            f"Expected 1 Pass-1 LLM call for incremental compile, "
-            f"got {len(pass1_calls)}"
+        assert len(editorial_calls) == 1, (
+            f"Expected 1 editorial brief call for incremental compile, "
+            f"got {len(editorial_calls)}"
         )
 
 
@@ -399,23 +538,20 @@ class TestAsk:
         """ask() returns an answer containing [[wikilinks]]."""
         project_dir, _ = compiled_project
 
-        ask_client = _make_mock_client(
-            {
-                "Question": ASK_RESPONSE,
-                "Answer": ASK_RESPONSE,
-            }
-        )
+        ask_client = _make_mock_client(_asker_keywords())
 
         from klore.asker import ask
 
         with (
             patch("klore.asker.get_client", return_value=ask_client),
-            patch("klore.asker.get_model", return_value="test-model"),
             patch(
-                "klore.asker.get_context_limit", return_value=200_000
+                "klore.asker.get_model",
+                side_effect=_fake_get_model,
             ),
         ):
-            answer = ask(project_dir, "What do transformers do?")
+            answer = asyncio.run(
+                ask(project_dir, "What do transformers do?")
+            )
 
         assert answer is not None
         assert len(answer) > 0
@@ -429,24 +565,25 @@ class TestAsk:
         """ask(save=True) persists a report file under wiki/reports/."""
         project_dir, _ = compiled_project
 
-        ask_client = _make_mock_client(
-            {
-                "Question": ASK_RESPONSE,
-                "Answer": ASK_RESPONSE,
-            }
-        )
+        ask_client = _make_mock_client(_asker_keywords())
 
         from klore.asker import ask
 
         with (
             patch("klore.asker.get_client", return_value=ask_client),
-            patch("klore.asker.get_model", return_value="test-model"),
             patch(
-                "klore.asker.get_context_limit", return_value=200_000
+                "klore.asker.get_model",
+                side_effect=_fake_get_model,
             ),
             patch("klore.asker.git_add_and_commit"),
         ):
-            ask(project_dir, "What do transformers do?", save=True)
+            asyncio.run(
+                ask(
+                    project_dir,
+                    "What do transformers do?",
+                    save=True,
+                )
+            )
 
         reports = list((project_dir / "wiki" / "reports").glob("*.md"))
         assert len(reports) >= 1, "Expected at least one saved report"

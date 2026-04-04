@@ -4,6 +4,8 @@
 
 # Klore — LLM Wiki Knowledge Compiler
 
+> An implementation of [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), with autonomous editorial judgment.
+
 **Raw sources in, living knowledge base out.**
 
 Drop PDFs, articles, and images into a folder. Klore compiles them into a structured, interlinked Obsidian-compatible wiki — then answers your questions using the compiled knowledge, not retrieved fragments.
@@ -18,8 +20,8 @@ Based on [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/4
 
 ```bash
 # Clone the repo
-git clone https://github.com/vbarsoum1/llm-wiki.git
-cd llm-wiki
+git clone https://github.com/vbarsoum1/llm-wiki-compiler.git
+cd llm-wiki-compiler
 
 # Create a virtual environment and install
 python3 -m venv .venv
