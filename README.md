@@ -178,7 +178,7 @@ my-research/
 │   ├── log.md               # Append-only chronological record of all operations
 │   ├── overview.md          # Living synthesis — Director-maintained thesis
 │   ├── sources/             # Per-source summaries
-│   ├── concepts/            # Synthesized concept articles (2+ sources)
+│   ├── concepts/            # Synthesized concept articles
 │   ├── entities/            # Named entity pages (people, orgs, tech)
 │   ├── reports/             # Filed Q&A answers (feed back into wiki)
 │   └── _meta/               # Compilation state, link graph, lint reports

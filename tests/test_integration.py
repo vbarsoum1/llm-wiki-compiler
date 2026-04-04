@@ -27,12 +27,15 @@ EDITORIAL_BRIEF_RESPONSE = json.dumps({
     "novelty": "Demonstrates transformer superiority",
     "contradictions": [],
     "emphasis": "Focus on transformer architecture",
-    "entities": [],
-    "concepts": [
+    "pages": [
         {
-            "name": "machine-learning",
+            "name": "Machine Learning",
+            "slug": "machine-learning",
+            "page_type": "concept",
             "action": "create",
-            "what_to_add": "Transformer evidence",
+            "significance": "high",
+            "justification": "Core topic discussed in depth",
+            "substance": "Definition, transformer evidence, comparison with RNNs",
         }
     ],
     "existing_pages_to_update": [],
@@ -191,12 +194,15 @@ EDITORIAL_BRIEF_RESPONSE_2 = json.dumps({
     "novelty": "Optimizer comparison evidence",
     "contradictions": [],
     "emphasis": "Focus on optimizer convergence",
-    "entities": [],
-    "concepts": [
+    "pages": [
         {
-            "name": "machine-learning",
+            "name": "Machine Learning",
+            "slug": "machine-learning",
+            "page_type": "concept",
             "action": "update",
-            "what_to_add": "Optimization evidence",
+            "significance": "high",
+            "justification": "Adds optimization evidence to existing page",
+            "substance": "Adam vs SGD convergence comparison",
         }
     ],
     "existing_pages_to_update": [],

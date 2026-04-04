@@ -312,6 +312,7 @@ def _default_brief(filename: str) -> dict[str, Any]:
         "novelty": "Unknown — editorial brief generation failed.",
         "contradictions": [],
         "emphasis": "Provide a balanced summary.",
+        "pages": [],
         "entities": [],
         "concepts": [],
         "existing_pages_to_update": [],
@@ -333,8 +334,16 @@ async def _get_editorial_brief(
         index_content = _read_index(wiki_dir)
         recent_log = read_recent_log(wiki_dir, n=20)
 
+        # Count existing pages for scale context
+        source_count = len(list((wiki_dir / "sources").glob("*.md"))) if (wiki_dir / "sources").is_dir() else 0
+        concept_count = len(list((wiki_dir / "concepts").glob("*.md"))) if (wiki_dir / "concepts").is_dir() else 0
+        entity_count = len(list((wiki_dir / "entities").glob("*.md"))) if (wiki_dir / "entities").is_dir() else 0
+
         prompt_template = _read_prompt("director_brief.md")
-        user_prompt = _fill_prompt(prompt_template, 
+        user_prompt = _fill_prompt(prompt_template,
+            source_count=str(source_count),
+            concept_count=str(concept_count),
+            entity_count=str(entity_count),
             index_content=index_content or "(empty wiki)",
             recent_log=recent_log,
             agents_md=agents_md or "(no schema defined)",
@@ -586,14 +595,31 @@ def _collect_entities_from_briefs(
     briefs: list[dict[str, Any]],
     extractions: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
-    """Collect all unique entities from editorial briefs.
+    """Collect entity recommendations from editorial briefs.
+
+    Reads from unified ``pages`` array (new schema) and falls back to
+    ``entities`` array (old schema). Filters out items the Director
+    marked as skip or low significance.
 
     Returns a dict keyed by entity slug, with merged info from all briefs.
     """
     entities: dict[str, dict[str, Any]] = {}
 
     for brief, extraction in zip(briefs, extractions):
-        for entity_info in brief.get("entities", []):
+        # Collect from unified pages array (new) + entities array (backward compat)
+        entity_list: list[dict[str, Any]] = []
+        for page_info in brief.get("pages", []):
+            if page_info.get("page_type") == "entity":
+                entity_list.append(page_info)
+        entity_list.extend(brief.get("entities", []))
+
+        for entity_info in entity_list:
+            # Filter: skip items the Director marked as skip or low significance
+            if entity_info.get("action") == "skip":
+                continue
+            if entity_info.get("significance") == "low":
+                continue
+
             slug = entity_info.get("slug", slugify(entity_info.get("name", "")))
             if not slug:
                 continue
@@ -609,7 +635,7 @@ def _collect_entities_from_briefs(
                     "source_slugs": [],
                 }
 
-            reason = entity_info.get("reason", "")
+            reason = entity_info.get("reason") or entity_info.get("justification", "")
             if reason:
                 entities[slug]["reasons"].append(reason)
             entities[slug]["source_filenames"].append(extraction["filename"])
@@ -857,20 +883,65 @@ async def _step4c_concept_pages(
     agents_md: str,
     state: CompileState,
     aliases: dict[str, str],
+    briefs: list[dict[str, Any]] | None = None,
 ) -> int:
-    """Step 4c: Synthesize concept articles from grouped sources."""
+    """Step 4c: Synthesize concept articles.
+
+    Uses Director recommendations from editorial briefs as the primary signal.
+    Falls back to tag-frequency (3+ sources) as a safety net for concepts
+    the Director might miss.
+    """
     strong_model = get_model("strong", project_dir)
     sources_dir = wiki_dir / "sources"
 
-    # Group sources by normalized tags
+    # Group sources by normalized tags (used for finding contributing sources)
     groups = _group_sources_by_tag(sources_dir, aliases)
 
-    # Filter to tags with 2+ sources
-    eligible = {tag: files for tag, files in groups.items() if len(files) >= 2}
+    # Collect Director-recommended concepts from briefs
+    recommended: dict[str, dict[str, Any]] = {}
+    for brief in (briefs or []):
+        # Read from unified pages array (new) + concepts array (backward compat)
+        concept_list: list[dict[str, Any]] = []
+        for page_info in brief.get("pages", []):
+            if page_info.get("page_type") == "concept":
+                concept_list.append(page_info)
+        concept_list.extend(brief.get("concepts", []))
+
+        for concept_info in concept_list:
+            if concept_info.get("action") == "skip":
+                continue
+            if concept_info.get("significance") == "low":
+                continue
+            name = concept_info.get("name", "")
+            slug = concept_info.get("slug", slugify(name))
+            if slug and slug not in recommended:
+                recommended[slug] = concept_info
+
+    # Safety net: also include tag-based concepts with 3+ sources
+    for tag, files in groups.items():
+        slug = slugify(tag)
+        if len(files) >= 3 and slug not in recommended:
+            recommended[slug] = {
+                "name": tag.replace("-", " ").title(),
+                "slug": slug,
+            }
+
+    # Build eligible dict: concept slug → list of contributing source files
+    eligible: dict[str, list[Path]] = {}
+    for slug, info in recommended.items():
+        name = info.get("name", slug)
+        tag_key = name.lower().replace(" ", "-")
+        # Try tag groups first for best source matching
+        matching = groups.get(tag_key, []) or groups.get(slug, [])
+        if not matching:
+            # Scan all source summaries as fallback
+            matching = sorted(sources_dir.glob("*.md")) if sources_dir.is_dir() else []
+        if matching:
+            eligible[tag_key] = matching
 
     if not eligible:
         click.echo(
-            "Step 4c (Concept Pages): no concepts with 2+ sources, skipping.",
+            "Step 4c (Concept Pages): no concepts to create, skipping.",
             err=True,
         )
         return 0
@@ -882,7 +953,6 @@ async def _step4c_concept_pages(
 
     (wiki_dir / "concepts").mkdir(parents=True, exist_ok=True)
 
-    # All concept slugs for cross-linking
     known_concepts = sorted(slugify(tag) for tag in eligible)
 
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
@@ -1246,7 +1316,7 @@ async def compile_wiki(project_dir: Path, full: bool = False) -> dict:
             briefs, extractions, wiki_dir, client, project_dir, agents_md, state
         ),
         _step4c_concept_pages(
-            wiki_dir, project_dir, client, agents_md, state, aliases
+            wiki_dir, project_dir, client, agents_md, state, aliases, briefs
         ),
     )
 

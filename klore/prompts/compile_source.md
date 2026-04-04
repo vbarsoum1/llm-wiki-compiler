@@ -22,6 +22,7 @@ Requirements:
 - Write a 3-5 sentence summary focusing on what this source uniquely contributes
 - Extract 3-8 key claims, each with provenance (quote or section reference)
 - Identify related concepts and entities that should be wikilinked
+- Only use [[wikilinks]] for concepts/entities that have existing pages in the wiki or that the editorial brief recommends for page creation. Mention others in plain text.
 - Note any contradictions flagged in the editorial brief
 - Use slugified filenames: lowercase, hyphens, no special chars
 

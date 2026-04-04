@@ -21,7 +21,7 @@ wiki/
 ├── log.md            # Append-only chronological record
 ├── overview.md       # Living synthesis (Director-maintained)
 ├── sources/          # Per-source summaries
-├── concepts/         # Synthesized concept articles (2+ sources)
+├── concepts/         # Synthesized concept articles (Director-recommended)
 ├── entities/         # Named entity pages (people, orgs, tech)
 ├── reports/          # Filed Q&A answers (compound back into wiki)
 └── _meta/            # Compilation state, link graph
@@ -85,7 +85,8 @@ knowledge base — key findings, methods, claims, data. Be specific.}
 
 Entity pages live in `wiki/entities/`. They track named entities — people,
 organizations, technologies, and products — across sources. Create an entity
-page when a named entity appears in 2+ sources.
+page when the Director determines the entity has enough substance and
+navigational value for a standalone page.
 
 ```markdown
 ---
@@ -117,8 +118,10 @@ What this source says about the entity.
 
 ## Concept Article Format
 
-Concept articles live in `wiki/concepts/`. They synthesize across multiple sources.
-Only create a concept article when 2+ sources reference the same concept.
+Concept articles live in `wiki/concepts/`. They synthesize knowledge about
+significant ideas. Create a concept article when the Director determines the
+concept is significant enough for a standalone page — based on depth of
+treatment and explanatory weight, not frequency of mention.
 
 ```markdown
 ---
@@ -219,7 +222,7 @@ Structure:
 - The index file does NOT use wikilinks (plain text for navigation only)
 - Prefer linking to existing articles over creating new ones
 - When in doubt about whether to create a new concept article, don't.
-  Only create when 2+ sources discuss the same idea.
+  Prefer inline mentions in source summaries over thin standalone pages.
 
 ## Tag Rules
 
@@ -230,8 +233,8 @@ Structure:
 
 ## Entity Rules
 
-- Create an entity page when a named entity (person, organization, technology,
-  product) appears in 2+ sources.
+- Create an entity page when a named entity has enough substance for a
+  meaningful standalone page. Passing mentions belong inline in source summaries.
 - Entity types: `person`, `organization`, `technology`, `product`
 - Entity pages track facts and appearances across sources, NOT abstract ideas
   (those belong in concept articles).
