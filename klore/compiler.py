@@ -1,9 +1,12 @@
-"""Three-pass compilation engine — the heart of Klore.
+"""Seven-step director-driven compilation engine — the heart of Klore.
 
-Pass 1: Extract source summaries from raw files (async, concurrent, fast tier).
-Tag normalization: Merge synonym tags via LLM (between Pass 1 and 2).
-Pass 2: Synthesize concept articles from grouped sources (async, concurrent, strong tier).
-Pass 3: Generate index files and link graph (strong tier).
+Step 1: EXTRACT — convert raw files to markdown (concurrent).
+Step 2: EDITORIAL BRIEF — Director reads extractions and produces editorial briefs.
+Step 3: TAG NORMALIZE — merge synonym tags via LLM (fast tier).
+Step 4: BUILD — write source summaries, entity pages, concept pages (concurrent, strong tier).
+Step 5: REVIEW — Director reviews pages created in Step 4.
+Step 6: INDEX & LOG — generate index, append log entries, build link graph.
+Step 7: OVERVIEW — Director writes/updates wiki/overview.md.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,7 @@ import yaml
 from klore.git import git_add_and_commit
 from klore.hash import hash_file, hash_string
 from klore.ingester import IngestionError, convert_to_markdown, slugify
+from klore.log import append_log, read_recent_log
 from klore.models import get_client, get_model
 from klore.state import CompileState
 
@@ -36,6 +41,17 @@ SEMAPHORE_LIMIT = 5
 def _read_prompt(name: str) -> str:
     """Read a prompt template from the prompts directory."""
     return (PROMPTS_DIR / name).read_text("utf-8")
+
+
+def _fill_prompt(template: str, **kwargs: str) -> str:
+    """Replace {key} placeholders without Python's format() brace conflicts.
+
+    Unlike str.format(), this doesn't choke on JSON braces in prompt templates.
+    """
+    result = template
+    for key, value in kwargs.items():
+        result = result.replace(f"{{{key}}}", str(value))
+    return result
 
 
 def _read_agents_md(project_dir: Path) -> str:
@@ -82,6 +98,8 @@ def _collect_all_tags(sources_dir: Path) -> list[str]:
         return []
     for md_file in sources_dir.glob("*.md"):
         fm = _parse_frontmatter(md_file.read_text("utf-8"))
+        if not isinstance(fm, dict):
+            continue
         for tag in fm.get("tags", []) or []:
             tags.add(str(tag).strip())
     return sorted(tags)
@@ -108,6 +126,8 @@ def _group_sources_by_tag(
         return groups
     for md_file in sorted(sources_dir.glob("*.md")):
         fm = _parse_frontmatter(md_file.read_text("utf-8"))
+        if not isinstance(fm, dict):
+            continue
         raw_tags = fm.get("tags", []) or []
         for tag in _apply_tag_aliases(raw_tags, aliases):
             groups.setdefault(tag, []).append(md_file)
@@ -131,15 +151,37 @@ def _list_files_summary(directory: Path, prefix: str = "") -> str:
         return "(none)"
     lines: list[str] = []
     for md_file in sorted(directory.glob("*.md")):
-        if md_file.name == "INDEX.md":
+        if md_file.name.lower() in ("index.md",):
             continue
         slug = md_file.stem
         fm = _parse_frontmatter(md_file.read_text("utf-8"))
         title = fm.get("title", slug)
         tags = fm.get("tags", [])
         tag_str = f" [{', '.join(tags)}]" if tags else ""
-        lines.append(f"- [[{prefix}{slug}]]: {title}{tag_str}")
+        lines.append(f"- {prefix}{slug}: {title}{tag_str}")
     return "\n".join(lines) if lines else "(none)"
+
+
+def _list_entity_files_summary(entities_dir: Path) -> str:
+    """List entity pages for index prompt."""
+    if not entities_dir.is_dir():
+        return "(none)"
+    lines: list[str] = []
+    for md_file in sorted(entities_dir.glob("*.md")):
+        slug = md_file.stem
+        fm = _parse_frontmatter(md_file.read_text("utf-8"))
+        title = fm.get("title", slug)
+        entity_type = fm.get("entity_type", "unknown")
+        lines.append(f"- entities/{slug}: {title} ({entity_type})")
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _read_index(wiki_dir: Path) -> str:
+    """Read wiki/index.md content, returning empty string if absent."""
+    index_path = wiki_dir / "index.md"
+    if index_path.is_file():
+        return index_path.read_text("utf-8")
+    return ""
 
 
 def _strip_code_fences(text: str) -> str:
@@ -193,167 +235,206 @@ async def _llm_call(
     )
 
 
-# ── Pass 1: Source Extraction ────────────────────────────────────────
+# ── Step 1: Extract ─────────────────────────────────────────────────
 
 
-async def _process_source(
+async def _extract_source(
     file_path: Path,
     project_dir: Path,
-    wiki_dir: Path,
-    client: Any,
-    model: str,
-    agents_md: str,
-    existing_tags: list[str],
-    state: CompileState,
     semaphore: asyncio.Semaphore,
-) -> tuple[bool, bool]:
-    """Process a single source file through Pass 1.
+) -> dict[str, Any] | None:
+    """Convert a single source file to markdown.
 
-    Returns (success, skipped).
+    Returns a dict with {filename, content, rel_path, file_path} or None on error.
     """
     async with semaphore:
         rel_path = str(file_path.relative_to(project_dir))
         filename = file_path.name
 
-        # Convert to markdown
         try:
-            source_content = await asyncio.to_thread(convert_to_markdown, file_path)
+            content = await asyncio.to_thread(convert_to_markdown, file_path)
         except IngestionError as exc:
             click.echo(f"  warning: skipping {filename}: {exc}", err=True)
-            return False, False
+            return None
 
-        # Build prompt
-        prompt_template = _read_prompt("compile_source.md")
-        user_prompt = prompt_template.format(
-            agents_md=agents_md,
-            existing_tags=", ".join(existing_tags) if existing_tags else "(none yet)",
-            filename=filename,
-            source_content=source_content,
-        )
-
-        # Call LLM
-        output = await _llm_call(
-            client, model, "You are a knowledge compiler.", user_prompt
-        )
-
-        # Validate
-        if not _validate_source_output(output):
-            # Retry once
-            retry_msg = (
-                "Your output was malformed. Please produce valid markdown "
-                "starting with YAML frontmatter."
-            )
-            output = await _llm_call(
-                client,
-                model,
-                "You are a knowledge compiler.",
-                user_prompt + "\n\n" + retry_msg,
-            )
-            if not _validate_source_output(output):
-                click.echo(
-                    f"  warning: malformed output for {filename}, skipping",
-                    err=True,
-                )
-                return False, False
-
-        # Write atomically to wiki/sources/{slug}.md
-        slug = slugify(file_path.stem)
-        dest = wiki_dir / "sources" / f"{slug}.md"
-        _atomic_write(dest, _strip_code_fences(output))
-
-        # Update state
-        file_hash = await asyncio.to_thread(hash_file, file_path)
-        state.update_hash(rel_path, file_hash)
-
-        return True, False
+        return {
+            "filename": filename,
+            "content": content,
+            "rel_path": rel_path,
+            "file_path": file_path,
+        }
 
 
-async def _pass1(
+async def _step1_extract(
     project_dir: Path,
-    wiki_dir: Path,
     raw_dir: Path,
-    client: Any,
-    agents_md: str,
     state: CompileState,
     full: bool,
-) -> dict[str, int]:
-    """Pass 1: Extract source summaries from raw files."""
-    model = get_model("fast", project_dir)
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Step 1: Extract raw files to markdown.
 
-    # Determine which sources need processing
+    Returns (extractions, skipped_count, error_count).
+    """
     if full:
         sources = sorted(p for p in raw_dir.rglob("*") if p.is_file())
     else:
         new, changed, _removed = state.diff_sources(raw_dir)
-        sources = sorted(
-            [project_dir / p for p in new + changed]
-        )
+        sources = sorted([project_dir / p for p in new + changed])
 
     if not sources:
-        click.echo("Pass 1: no sources to process.", err=True)
-        return {"sources_processed": 0, "pass1_skipped": 0, "pass1_errors": 0}
+        click.echo("Step 1 (Extract): no sources to process.", err=True)
+        return [], 0, 0
 
-    click.echo(f"Pass 1: processing {len(sources)} sources...", err=True)
-
-    # Ensure output directory exists
-    (wiki_dir / "sources").mkdir(parents=True, exist_ok=True)
-
-    # Collect existing tags for context
-    existing_tags = _collect_all_tags(wiki_dir / "sources")
+    click.echo(f"Step 1 (Extract): converting {len(sources)} sources...", err=True)
 
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
-    tasks = [
-        _process_source(
-            src, project_dir, wiki_dir, client, model,
-            agents_md, existing_tags, state, semaphore,
-        )
-        for src in sources
-    ]
+    tasks = [_extract_source(src, project_dir, semaphore) for src in sources]
     results = await asyncio.gather(*tasks)
 
-    processed = sum(1 for success, _ in results if success)
-    errors = sum(1 for success, skipped in results if not success and not skipped)
+    extractions = [r for r in results if r is not None]
+    errors = sum(1 for r in results if r is None)
 
     click.echo(
-        f"Pass 1: done — {processed} processed, {errors} errors.", err=True
+        f"Step 1 (Extract): done — {len(extractions)} extracted, {errors} errors.",
+        err=True,
     )
+    return extractions, 0, errors
+
+
+# ── Step 2: Editorial Brief ─────────────────────────────────────────
+
+
+def _default_brief(filename: str) -> dict[str, Any]:
+    """Return a minimal default editorial brief when JSON parsing fails."""
     return {
-        "sources_processed": processed,
-        "pass1_skipped": len(sources) - processed - errors,
-        "pass1_errors": errors,
+        "summary": f"Source file: {filename}",
+        "key_takeaways": [],
+        "novelty": "Unknown — editorial brief generation failed.",
+        "contradictions": [],
+        "emphasis": "Provide a balanced summary.",
+        "entities": [],
+        "concepts": [],
+        "existing_pages_to_update": [],
+        "questions_raised": [],
+        "suggested_sources": [],
     }
 
 
-# ── Tag Normalization ────────────────────────────────────────────────
-
-
-async def _normalize_tags(
+async def _get_editorial_brief(
+    extraction: dict[str, Any],
     wiki_dir: Path,
     client: Any,
-    model: str,
+    director_model: str,
     agents_md: str,
+    semaphore: asyncio.Semaphore,
+) -> dict[str, Any]:
+    """Call Director to produce an editorial brief for a single extraction."""
+    async with semaphore:
+        index_content = _read_index(wiki_dir)
+        recent_log = read_recent_log(wiki_dir, n=20)
+
+        prompt_template = _read_prompt("director_brief.md")
+        user_prompt = _fill_prompt(prompt_template, 
+            index_content=index_content or "(empty wiki)",
+            recent_log=recent_log,
+            agents_md=agents_md or "(no schema defined)",
+            filename=extraction["filename"],
+            source_content=extraction["content"],
+        )
+
+        output = await _llm_call(
+            client, director_model,
+            "You are the editorial director of a knowledge wiki.",
+            user_prompt,
+        )
+
+        # Parse JSON response
+        cleaned = _strip_code_fences(output)
+        # Also strip json fences specifically
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip()
+
+        try:
+            brief = json.loads(cleaned)
+        except json.JSONDecodeError:
+            click.echo(
+                f"  warning: could not parse editorial brief for "
+                f"{extraction['filename']}, using defaults.",
+                err=True,
+            )
+            brief = _default_brief(extraction["filename"])
+
+        # Attach the filename for tracking
+        brief["_filename"] = extraction["filename"]
+        brief["_rel_path"] = extraction["rel_path"]
+        return brief
+
+
+async def _step2_editorial_briefs(
+    extractions: list[dict[str, Any]],
+    wiki_dir: Path,
+    project_dir: Path,
+    client: Any,
+    agents_md: str,
+) -> list[dict[str, Any]]:
+    """Step 2: Get editorial briefs from the Director for each extraction."""
+    if not extractions:
+        return []
+
+    director_model = get_model("director", project_dir)
+    click.echo(
+        f"Step 2 (Editorial Brief): requesting {len(extractions)} briefs...",
+        err=True,
+    )
+
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+    tasks = [
+        _get_editorial_brief(
+            ext, wiki_dir, client, director_model, agents_md, semaphore,
+        )
+        for ext in extractions
+    ]
+    briefs = await asyncio.gather(*tasks)
+
+    click.echo(
+        f"Step 2 (Editorial Brief): done — {len(briefs)} briefs produced.",
+        err=True,
+    )
+    return list(briefs)
+
+
+# ── Step 3: Tag Normalize ───────────────────────────────────────────
+
+
+async def _step3_normalize_tags(
+    wiki_dir: Path,
+    client: Any,
+    fast_model: str,
 ) -> dict[str, str]:
-    """Normalize tags across all source summaries via LLM."""
+    """Step 3: Normalize tags across all source summaries via LLM."""
     all_tags = _collect_all_tags(wiki_dir / "sources")
     if not all_tags:
-        click.echo("Tag normalization: no tags found, skipping.", err=True)
+        click.echo("Step 3 (Tag Normalize): no tags found, skipping.", err=True)
         return {}
 
     click.echo(
-        f"Tag normalization: {len(all_tags)} unique tags...", err=True
+        f"Step 3 (Tag Normalize): {len(all_tags)} unique tags...", err=True
     )
 
     prompt_template = _read_prompt("normalize_tags.md")
-    user_prompt = prompt_template.replace("{tag_list}", "\n".join(f"- {t}" for t in all_tags))
+    user_prompt = prompt_template.replace(
+        "{tag_list}", "\n".join(f"- {t}" for t in all_tags)
+    )
 
     output = await _llm_call(
-        client, model, "You are a tag normalizer.", user_prompt
+        client, fast_model, "You are a tag normalizer.", user_prompt
     )
 
     # Parse JSON from response — strip markdown fences if present
     cleaned = output.strip()
     if cleaned.startswith("```"):
-        # Remove opening fence (```json or ```)
         cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
         cleaned = re.sub(r"\n?```$", "", cleaned)
         cleaned = cleaned.strip()
@@ -377,20 +458,324 @@ async def _normalize_tags(
 
     normalized_count = sum(1 for k, v in aliases.items() if k != v)
     click.echo(
-        f"Tag normalization: done — {normalized_count} tags merged.", err=True
+        f"Step 3 (Tag Normalize): done — {normalized_count} tags merged.",
+        err=True,
     )
     return aliases
 
 
-# ── Pass 2: Concept Synthesis ────────────────────────────────────────
+# ── Step 4: Build ───────────────────────────────────────────────────
 
 
-async def _process_concept(
+# ── Step 4a: Source Summaries ────────────────────────────────────────
+
+
+async def _build_source_summary(
+    extraction: dict[str, Any],
+    brief: dict[str, Any],
+    wiki_dir: Path,
+    project_dir: Path,
+    client: Any,
+    strong_model: str,
+    agents_md: str,
+    existing_tags: list[str],
+    state: CompileState,
+    semaphore: asyncio.Semaphore,
+) -> bool:
+    """Build a single source summary guided by the editorial brief.
+
+    Returns True on success.
+    """
+    async with semaphore:
+        filename = extraction["filename"]
+        file_path = extraction["file_path"]
+
+        # Format brief as JSON string for the prompt
+        brief_json = json.dumps(
+            {k: v for k, v in brief.items() if not k.startswith("_")},
+            indent=2,
+        )
+
+        prompt_template = _read_prompt("compile_source.md")
+        user_prompt = _fill_prompt(prompt_template, 
+            agents_md=agents_md,
+            editorial_brief=brief_json,
+            existing_tags=", ".join(existing_tags) if existing_tags else "(none yet)",
+            filename=filename,
+            source_content=extraction["content"],
+        )
+
+        output = await _llm_call(
+            client, strong_model, "You are a knowledge compiler.", user_prompt
+        )
+
+        # Validate
+        if not _validate_source_output(output):
+            retry_msg = (
+                "Your output was malformed. Please produce valid markdown "
+                "starting with YAML frontmatter."
+            )
+            output = await _llm_call(
+                client, strong_model,
+                "You are a knowledge compiler.",
+                user_prompt + "\n\n" + retry_msg,
+            )
+            if not _validate_source_output(output):
+                click.echo(
+                    f"  warning: malformed output for {filename}, skipping",
+                    err=True,
+                )
+                return False
+
+        # Write atomically to wiki/sources/{slug}.md
+        slug = slugify(file_path.stem)
+        dest = wiki_dir / "sources" / f"{slug}.md"
+        _atomic_write(dest, _strip_code_fences(output))
+
+        # Update state
+        file_hash = await asyncio.to_thread(hash_file, file_path)
+        state.update_hash(extraction["rel_path"], file_hash)
+
+        return True
+
+
+async def _step4a_source_summaries(
+    extractions: list[dict[str, Any]],
+    briefs: list[dict[str, Any]],
+    wiki_dir: Path,
+    project_dir: Path,
+    client: Any,
+    agents_md: str,
+    state: CompileState,
+) -> int:
+    """Step 4a: Build source summaries guided by editorial briefs."""
+    if not extractions:
+        return 0
+
+    strong_model = get_model("strong", project_dir)
+    (wiki_dir / "sources").mkdir(parents=True, exist_ok=True)
+    existing_tags = _collect_all_tags(wiki_dir / "sources")
+
+    click.echo(
+        f"Step 4a (Source Summaries): building {len(extractions)} summaries...",
+        err=True,
+    )
+
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+    tasks = [
+        _build_source_summary(
+            ext, brief, wiki_dir, project_dir, client, strong_model,
+            agents_md, existing_tags, state, semaphore,
+        )
+        for ext, brief in zip(extractions, briefs)
+    ]
+    results = await asyncio.gather(*tasks)
+
+    processed = sum(1 for r in results if r)
+    click.echo(
+        f"Step 4a (Source Summaries): done — {processed} summaries written.",
+        err=True,
+    )
+    return processed
+
+
+# ── Step 4b: Entity Pages ───────────────────────────────────────────
+
+
+def _collect_entities_from_briefs(
+    briefs: list[dict[str, Any]],
+    extractions: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Collect all unique entities from editorial briefs.
+
+    Returns a dict keyed by entity slug, with merged info from all briefs.
+    """
+    entities: dict[str, dict[str, Any]] = {}
+
+    for brief, extraction in zip(briefs, extractions):
+        for entity_info in brief.get("entities", []):
+            slug = entity_info.get("slug", slugify(entity_info.get("name", "")))
+            if not slug:
+                continue
+
+            if slug not in entities:
+                entities[slug] = {
+                    "name": entity_info.get("name", slug),
+                    "slug": slug,
+                    "entity_type": entity_info.get("entity_type", "unknown"),
+                    "action": entity_info.get("action", "create"),
+                    "reasons": [],
+                    "source_filenames": [],
+                    "source_slugs": [],
+                }
+
+            reason = entity_info.get("reason", "")
+            if reason:
+                entities[slug]["reasons"].append(reason)
+            entities[slug]["source_filenames"].append(extraction["filename"])
+            source_slug = slugify(extraction["file_path"].stem)
+            if source_slug not in entities[slug]["source_slugs"]:
+                entities[slug]["source_slugs"].append(source_slug)
+
+            # Upgrade action to "update" if any brief says "update"
+            if entity_info.get("action") == "update":
+                entities[slug]["action"] = "update"
+
+    return entities
+
+
+async def _build_entity_page(
+    entity_info: dict[str, Any],
+    wiki_dir: Path,
+    client: Any,
+    strong_model: str,
+    agents_md: str,
+    known_entities: list[str],
+    known_concepts: list[str],
+    state: CompileState,
+    semaphore: asyncio.Semaphore,
+) -> bool:
+    """Build or update a single entity page.
+
+    Returns True on success.
+    """
+    async with semaphore:
+        slug = entity_info["slug"]
+        entity_name = entity_info["name"]
+        entity_type = entity_info["entity_type"]
+        action = entity_info["action"]
+
+        # Read existing entity page if present
+        existing_path = wiki_dir / "entities" / f"{slug}.md"
+        existing_page = ""
+        if existing_path.is_file():
+            existing_page = existing_path.read_text("utf-8")
+
+        # Gather source summaries that mention this entity
+        source_mentions_parts: list[str] = []
+        sources_dir = wiki_dir / "sources"
+        for source_slug in entity_info["source_slugs"]:
+            source_file = sources_dir / f"{source_slug}.md"
+            if source_file.is_file():
+                content = source_file.read_text("utf-8")
+                source_mentions_parts.append(
+                    f"### From {source_slug}\n\n{content}"
+                )
+        source_mentions = (
+            "\n\n---\n\n".join(source_mentions_parts)
+            if source_mentions_parts
+            else "(no source summaries available yet)"
+        )
+
+        # Director's notes from the briefs
+        director_notes = "\n".join(
+            f"- {r}" for r in entity_info["reasons"]
+        ) or "(no specific notes)"
+
+        prompt_template = _read_prompt("compile_entity.md")
+        user_prompt = _fill_prompt(prompt_template, 
+            agents_md=agents_md,
+            entity_name=entity_name,
+            entity_type=entity_type,
+            action=action,
+            director_notes=director_notes,
+            source_mentions=source_mentions,
+            known_entities=", ".join(f"[[{e}]]" for e in known_entities)
+            if known_entities
+            else "(none)",
+            known_concepts=", ".join(f"[[{c}]]" for c in known_concepts)
+            if known_concepts
+            else "(none)",
+            existing_page=existing_page or "(new entity)",
+        )
+
+        output = await _llm_call(
+            client, strong_model, "You are a knowledge compiler.", user_prompt
+        )
+
+        if not _validate_concept_output(output):
+            retry_msg = (
+                "Your output was malformed. Please produce valid markdown "
+                "starting with YAML frontmatter."
+            )
+            output = await _llm_call(
+                client, strong_model,
+                "You are a knowledge compiler.",
+                user_prompt + "\n\n" + retry_msg,
+            )
+            if not _validate_concept_output(output):
+                click.echo(
+                    f"  warning: malformed output for entity {entity_name}, skipping",
+                    err=True,
+                )
+                return False
+
+        _atomic_write(existing_path, _strip_code_fences(output))
+
+        # Update state
+        state.update_entity_sources(slug, entity_info["source_slugs"])
+
+        return True
+
+
+async def _step4b_entity_pages(
+    briefs: list[dict[str, Any]],
+    extractions: list[dict[str, Any]],
+    wiki_dir: Path,
+    client: Any,
+    project_dir: Path,
+    agents_md: str,
+    state: CompileState,
+) -> int:
+    """Step 4b: Create/update entity pages as directed by briefs."""
+    entities = _collect_entities_from_briefs(briefs, extractions)
+
+    if not entities:
+        click.echo("Step 4b (Entity Pages): no entities to create.", err=True)
+        return 0
+
+    strong_model = get_model("strong", project_dir)
+    (wiki_dir / "entities").mkdir(parents=True, exist_ok=True)
+
+    # Gather known entities and concepts for cross-linking
+    known_entities = sorted(entities.keys())
+    concepts_dir = wiki_dir / "concepts"
+    known_concepts = []
+    if concepts_dir.is_dir():
+        known_concepts = sorted(f.stem for f in concepts_dir.glob("*.md"))
+
+    click.echo(
+        f"Step 4b (Entity Pages): building {len(entities)} entity pages...",
+        err=True,
+    )
+
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+    tasks = [
+        _build_entity_page(
+            entity_info, wiki_dir, client, strong_model, agents_md,
+            known_entities, known_concepts, state, semaphore,
+        )
+        for entity_info in entities.values()
+    ]
+    results = await asyncio.gather(*tasks)
+
+    created = sum(1 for r in results if r)
+    click.echo(
+        f"Step 4b (Entity Pages): done — {created} entity pages written.",
+        err=True,
+    )
+    return created
+
+
+# ── Step 4c: Concept Pages ──────────────────────────────────────────
+
+
+async def _build_concept_page(
     tag: str,
     source_files: list[Path],
     wiki_dir: Path,
     client: Any,
-    model: str,
+    strong_model: str,
     agents_md: str,
     known_concepts: list[str],
     state: CompileState,
@@ -422,7 +807,7 @@ async def _process_concept(
 
         # Build prompt
         prompt_template = _read_prompt("compile_concept.md")
-        user_prompt = prompt_template.format(
+        user_prompt = _fill_prompt(prompt_template, 
             agents_md=agents_md,
             concept_name=concept_name,
             source_count=len(source_files),
@@ -435,7 +820,7 @@ async def _process_concept(
 
         # Call LLM
         output = await _llm_call(
-            client, model, "You are a knowledge compiler.", user_prompt
+            client, strong_model, "You are a knowledge compiler.", user_prompt
         )
 
         # Validate
@@ -445,8 +830,7 @@ async def _process_concept(
                 "starting with YAML frontmatter."
             )
             output = await _llm_call(
-                client,
-                model,
+                client, strong_model,
                 "You are a knowledge compiler.",
                 user_prompt + "\n\n" + retry_msg,
             )
@@ -466,7 +850,7 @@ async def _process_concept(
         return True
 
 
-async def _pass2(
+async def _step4c_concept_pages(
     wiki_dir: Path,
     project_dir: Path,
     client: Any,
@@ -474,8 +858,8 @@ async def _pass2(
     state: CompileState,
     aliases: dict[str, str],
 ) -> int:
-    """Pass 2: Synthesize concept articles from grouped sources."""
-    model = get_model("strong", project_dir)
+    """Step 4c: Synthesize concept articles from grouped sources."""
+    strong_model = get_model("strong", project_dir)
     sources_dir = wiki_dir / "sources"
 
     # Group sources by normalized tags
@@ -485,14 +869,17 @@ async def _pass2(
     eligible = {tag: files for tag, files in groups.items() if len(files) >= 2}
 
     if not eligible:
-        click.echo("Pass 2: no concepts with 2+ sources, skipping.", err=True)
+        click.echo(
+            "Step 4c (Concept Pages): no concepts with 2+ sources, skipping.",
+            err=True,
+        )
         return 0
 
     click.echo(
-        f"Pass 2: synthesizing {len(eligible)} concepts...", err=True
+        f"Step 4c (Concept Pages): synthesizing {len(eligible)} concepts...",
+        err=True,
     )
 
-    # Ensure output directory exists
     (wiki_dir / "concepts").mkdir(parents=True, exist_ok=True)
 
     # All concept slugs for cross-linking
@@ -500,8 +887,8 @@ async def _pass2(
 
     semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
     tasks = [
-        _process_concept(
-            tag, files, wiki_dir, client, model,
+        _build_concept_page(
+            tag, files, wiki_dir, client, strong_model,
             agents_md, known_concepts, state, semaphore,
         )
         for tag, files in sorted(eligible.items())
@@ -509,72 +896,240 @@ async def _pass2(
     results = await asyncio.gather(*tasks)
 
     generated = sum(1 for r in results if r)
-    click.echo(f"Pass 2: done — {generated} concepts generated.", err=True)
+    click.echo(
+        f"Step 4c (Concept Pages): done — {generated} concepts generated.",
+        err=True,
+    )
     return generated
 
 
-# ── Pass 3: Index Generation ────────────────────────────────────────
+# ── Step 5: Review ──────────────────────────────────────────────────
 
 
-async def _pass3(
+async def _step5_review(
+    extractions: list[dict[str, Any]],
+    briefs: list[dict[str, Any]],
+    wiki_dir: Path,
+    project_dir: Path,
+    client: Any,
+) -> list[dict[str, Any]]:
+    """Step 5: Director reviews the pages created/updated in Step 4.
+
+    Returns list of review results (one per source).
+    For v1, we just log issues found.
+    """
+    if not extractions:
+        return []
+
+    director_model = get_model("director", project_dir)
+    click.echo(
+        f"Step 5 (Review): Director reviewing {len(extractions)} builds...",
+        err=True,
+    )
+
+    prompt_template = _read_prompt("director_review.md")
+    reviews: list[dict[str, Any]] = []
+
+    semaphore = asyncio.Semaphore(SEMAPHORE_LIMIT)
+
+    async def _review_one(
+        extraction: dict[str, Any],
+        brief: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with semaphore:
+            slug = slugify(extraction["file_path"].stem)
+
+            # Read source summary
+            source_file = wiki_dir / "sources" / f"{slug}.md"
+            source_summary = ""
+            if source_file.is_file():
+                source_summary = source_file.read_text("utf-8")
+
+            # Gather entity pages from this brief
+            entity_pages_parts: list[str] = []
+            for entity_info in brief.get("entities", []):
+                entity_slug = entity_info.get(
+                    "slug", slugify(entity_info.get("name", ""))
+                )
+                entity_file = wiki_dir / "entities" / f"{entity_slug}.md"
+                if entity_file.is_file():
+                    entity_pages_parts.append(
+                        f"### {entity_slug}\n\n{entity_file.read_text('utf-8')}"
+                    )
+            entity_pages = (
+                "\n\n---\n\n".join(entity_pages_parts)
+                if entity_pages_parts
+                else "(no entity pages)"
+            )
+
+            # Gather concept pages (simplified — check concepts dir)
+            concept_pages_parts: list[str] = []
+            concepts_dir = wiki_dir / "concepts"
+            if concepts_dir.is_dir():
+                # Read concept pages that reference this source
+                for concept_file in concepts_dir.glob("*.md"):
+                    content = concept_file.read_text("utf-8")
+                    if slug in content:
+                        concept_pages_parts.append(
+                            f"### {concept_file.stem}\n\n{content}"
+                        )
+            concept_pages = (
+                "\n\n---\n\n".join(concept_pages_parts)
+                if concept_pages_parts
+                else "(no concept pages)"
+            )
+
+            brief_json = json.dumps(
+                {k: v for k, v in brief.items() if not k.startswith("_")},
+                indent=2,
+            )
+
+            user_prompt = _fill_prompt(prompt_template, 
+                editorial_brief=brief_json,
+                source_summary=source_summary or "(not written)",
+                entity_pages=entity_pages,
+                concept_pages=concept_pages,
+            )
+
+            output = await _llm_call(
+                client, director_model,
+                "You are the editorial director reviewing wiki changes.",
+                user_prompt,
+            )
+
+            # Parse review JSON
+            cleaned = _strip_code_fences(output)
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```[a-z]*\n?", "", cleaned)
+                cleaned = re.sub(r"\n?```$", "", cleaned)
+                cleaned = cleaned.strip()
+
+            try:
+                review = json.loads(cleaned)
+            except json.JSONDecodeError:
+                review = {
+                    "approved": True,
+                    "issues": [],
+                    "editorial_notes": "Review parsing failed — auto-approved.",
+                }
+
+            return review
+
+    tasks = [
+        _review_one(ext, brief)
+        for ext, brief in zip(extractions, briefs)
+    ]
+    reviews = await asyncio.gather(*tasks)
+
+    # Log any issues found (v1: just log, don't re-run builds)
+    total_issues = sum(len(r.get("issues", [])) for r in reviews)
+    if total_issues:
+        click.echo(
+            f"Step 5 (Review): Director found {total_issues} issues "
+            f"(logged for future improvement).",
+            err=True,
+        )
+    else:
+        click.echo("Step 5 (Review): Director approved all pages.", err=True)
+
+    return list(reviews)
+
+
+# ── Step 6: Index & Log ─────────────────────────────────────────────
+
+
+async def _step6_index_and_log(
     wiki_dir: Path,
     project_dir: Path,
     client: Any,
     agents_md: str,
+    extractions: list[dict[str, Any]],
+    briefs: list[dict[str, Any]],
+    reviews: list[dict[str, Any]],
+    sources_processed: int,
+    entities_created: int,
+    concepts_generated: int,
 ) -> None:
-    """Pass 3: Generate index files and link graph."""
-    model = get_model("strong", project_dir)
+    """Step 6: Generate index, append log entries, build link graph."""
+    strong_model = get_model("strong", project_dir)
 
-    click.echo("Pass 3: generating indexes...", err=True)
+    click.echo("Step 6 (Index & Log): generating index...", err=True)
 
     # Gather listings
     concept_list = _list_files_summary(wiki_dir / "concepts", prefix="concepts/")
     source_list = _list_files_summary(wiki_dir / "sources", prefix="sources/")
+    entity_list = _list_entity_files_summary(wiki_dir / "entities")
 
     reports_dir = wiki_dir / "reports"
     report_list = _list_files_summary(reports_dir, prefix="reports/")
 
-    concept_count = len(list((wiki_dir / "concepts").glob("*.md"))) if (wiki_dir / "concepts").is_dir() else 0
-    source_count = len(list((wiki_dir / "sources").glob("*.md"))) if (wiki_dir / "sources").is_dir() else 0
-    report_count = len(list(reports_dir.glob("*.md"))) if reports_dir.is_dir() else 0
+    concept_count = (
+        len(list((wiki_dir / "concepts").glob("*.md")))
+        if (wiki_dir / "concepts").is_dir()
+        else 0
+    )
+    source_count = (
+        len(list((wiki_dir / "sources").glob("*.md")))
+        if (wiki_dir / "sources").is_dir()
+        else 0
+    )
+    entity_count = (
+        len(list((wiki_dir / "entities").glob("*.md")))
+        if (wiki_dir / "entities").is_dir()
+        else 0
+    )
+    report_count = (
+        len(list(reports_dir.glob("*.md"))) if reports_dir.is_dir() else 0
+    )
 
-    # Exclude INDEX.md from counts
-    if (wiki_dir / "concepts" / "INDEX.md").is_file():
-        concept_count -= 1
-    if (wiki_dir / "sources" / "INDEX.md").is_file():
-        source_count -= 1
-    if (reports_dir / "INDEX.md").is_file():
-        report_count -= 1
-
+    # Generate single wiki/index.md
     prompt_template = _read_prompt("compile_index.md")
+    user_prompt = _fill_prompt(prompt_template, 
+        agents_md=agents_md,
+        concept_count=concept_count,
+        concept_list=concept_list,
+        entity_count=entity_count,
+        entity_list=entity_list,
+        source_count=source_count,
+        source_list=source_list,
+        report_count=report_count,
+        report_list=report_list,
+    )
 
-    # Generate three index files concurrently
-    index_specs = [
-        ("main", wiki_dir / "INDEX.md"),
-        ("concepts", wiki_dir / "concepts" / "INDEX.md"),
-        ("sources", wiki_dir / "sources" / "INDEX.md"),
-    ]
+    output = await _llm_call(
+        client, strong_model, "You are a knowledge compiler.", user_prompt
+    )
+    _atomic_write(wiki_dir / "index.md", _strip_code_fences(output))
 
-    async def _generate_index(index_type: str, dest: Path) -> None:
-        user_prompt = prompt_template.format(
-            agents_md=agents_md,
-            index_type=index_type,
-            concept_count=concept_count,
-            concept_list=concept_list,
-            source_count=source_count,
-            source_list=source_list,
-            report_count=report_count,
-            report_list=report_list,
+    # Append log entries for each source processed
+    for ext, brief, review in zip(extractions, briefs, reviews):
+        filename = ext["filename"]
+        slug = slugify(ext["file_path"].stem)
+
+        # Collect pages touched by this source
+        pages_touched = [f"sources/{slug}.md"]
+        for entity_info in brief.get("entities", []):
+            entity_slug = entity_info.get(
+                "slug", slugify(entity_info.get("name", ""))
+            )
+            if entity_slug:
+                pages_touched.append(f"entities/{entity_slug}.md")
+
+        entity_count_for_source = len(brief.get("entities", []))
+        details = (
+            f"Created source summary for {filename}. "
+            f"Entities: {entity_count_for_source}."
         )
-        output = await _llm_call(
-            client, model, "You are a knowledge compiler.", user_prompt
-        )
-        _atomic_write(dest, _strip_code_fences(output))
 
-    await asyncio.gather(*[
-        _generate_index(idx_type, dest)
-        for idx_type, dest in index_specs
-    ])
+        editorial_notes = review.get("editorial_notes")
+
+        append_log(
+            wiki_dir,
+            action="ingest",
+            title=filename,
+            details=details,
+            editorial_notes=editorial_notes,
+        )
 
     # Build link graph
     link_graph = _build_link_graph(wiki_dir)
@@ -585,14 +1140,60 @@ async def _pass3(
         encoding="utf-8",
     )
 
-    click.echo("Pass 3: done — indexes and link graph generated.", err=True)
+    click.echo(
+        f"Step 6 (Index & Log): done — index generated, "
+        f"{len(extractions)} log entries appended.",
+        err=True,
+    )
+
+
+# ── Step 7: Overview ────────────────────────────────────────────────
+
+
+async def _step7_overview(
+    wiki_dir: Path,
+    project_dir: Path,
+    client: Any,
+    agents_md: str,
+) -> None:
+    """Step 7: Director writes/updates wiki/overview.md."""
+    director_model = get_model("director", project_dir)
+
+    click.echo("Step 7 (Overview): Director writing overview...", err=True)
+
+    # Read current overview
+    overview_path = wiki_dir / "overview.md"
+    current_overview = ""
+    if overview_path.is_file():
+        current_overview = overview_path.read_text("utf-8")
+
+    index_content = _read_index(wiki_dir)
+    recent_log = read_recent_log(wiki_dir, n=20)
+
+    prompt_template = _read_prompt("director_overview.md")
+    user_prompt = _fill_prompt(prompt_template, 
+        current_overview=current_overview or "(no overview yet)",
+        index_content=index_content or "(empty wiki)",
+        recent_log=recent_log,
+        agents_md=agents_md or "(no schema defined)",
+    )
+
+    output = await _llm_call(
+        client, director_model,
+        "You are the editorial director of a knowledge wiki.",
+        user_prompt,
+    )
+
+    _atomic_write(overview_path, _strip_code_fences(output))
+
+    click.echo("Step 7 (Overview): done — overview written.", err=True)
 
 
 # ── Main entry point ─────────────────────────────────────────────────
 
 
 async def compile_wiki(project_dir: Path, full: bool = False) -> dict:
-    """Run the three-pass compilation. Returns stats dict."""
+    """Run the seven-step director-driven compilation. Returns stats dict."""
     wiki_dir = project_dir / "wiki"
     raw_dir = project_dir / "raw"
 
@@ -616,47 +1217,81 @@ async def compile_wiki(project_dir: Path, full: bool = False) -> dict:
     # Initialize client
     client = get_client(project_dir)
 
-    # ── Pass 1 ────────────────────────────────────────────────────
-    pass1_stats = await _pass1(
-        project_dir, wiki_dir, raw_dir, client, agents_md, state, full
+    # ── Step 1: Extract ──────────────────────────────────────────
+    extractions, pass1_skipped, pass1_errors = await _step1_extract(
+        project_dir, raw_dir, state, full
     )
 
-    # ── Tag Normalization ─────────────────────────────────────────
+    # ── Step 2: Editorial Briefs ─────────────────────────────────
+    briefs = await _step2_editorial_briefs(
+        extractions, wiki_dir, project_dir, client, agents_md
+    )
+
+    # ── Step 4a: Source Summaries ──────────────────────────────────
+    # Write source summaries first — tag normalization and concept
+    # synthesis both need them on disk.
+    sources_processed = await _step4a_source_summaries(
+        extractions, briefs, wiki_dir, project_dir, client, agents_md, state
+    )
+
+    # ── Step 3: Tag Normalize ────────────────────────────────────
+    # Run AFTER source summaries are written so we have tags to normalize.
     fast_model = get_model("fast", project_dir)
-    aliases = await _normalize_tags(wiki_dir, client, fast_model, agents_md)
-    tags_normalized = sum(1 for k, v in aliases.items() if k != v)
+    aliases = await _step3_normalize_tags(wiki_dir, client, fast_model)
 
-    # ── Pass 2 ────────────────────────────────────────────────────
-    concepts_generated = await _pass2(
-        wiki_dir, project_dir, client, agents_md, state, aliases
+    # ── Step 4b+4c: Entity + Concept Pages ───────────────────────
+    # Run entity pages and concept pages concurrently.
+    entities_created, concepts_generated = await asyncio.gather(
+        _step4b_entity_pages(
+            briefs, extractions, wiki_dir, client, project_dir, agents_md, state
+        ),
+        _step4c_concept_pages(
+            wiki_dir, project_dir, client, agents_md, state, aliases
+        ),
     )
 
-    # ── Pass 3 ────────────────────────────────────────────────────
-    await _pass3(wiki_dir, project_dir, client, agents_md)
+    # ── Step 5: Review ───────────────────────────────────────────
+    reviews = await _step5_review(
+        extractions, briefs, wiki_dir, project_dir, client
+    )
 
-    # ── Finalize ──────────────────────────────────────────────────
+    # ── Step 6: Index & Log ──────────────────────────────────────
+    await _step6_index_and_log(
+        wiki_dir, project_dir, client, agents_md,
+        extractions, briefs, reviews,
+        sources_processed, entities_created, concepts_generated,
+    )
+
+    # ── Step 7: Overview ─────────────────────────────────────────
+    await _step7_overview(wiki_dir, project_dir, client, agents_md)
+
+    # ── Finalize ─────────────────────────────────────────────────
     state.save(wiki_dir)
+
+    tags_normalized = sum(1 for k, v in aliases.items() if k != v)
 
     try:
         git_add_and_commit(
             project_dir,
-            f"klore compile: {pass1_stats['sources_processed']} sources, "
-            f"{concepts_generated} concepts",
+            f"klore compile: {sources_processed} sources, "
+            f"{concepts_generated} concepts, {entities_created} entities",
         )
     except RuntimeError as exc:
         click.echo(f"  warning: git commit failed: {exc}", err=True)
 
     stats = {
-        "sources_processed": pass1_stats["sources_processed"],
+        "sources_processed": sources_processed,
         "concepts_generated": concepts_generated,
+        "entities_created": entities_created,
         "tags_normalized": tags_normalized,
-        "pass1_skipped": pass1_stats["pass1_skipped"],
-        "pass1_errors": pass1_stats["pass1_errors"],
+        "pass1_skipped": pass1_skipped,
+        "pass1_errors": pass1_errors,
     }
 
     click.echo(
         f"Compilation complete: {stats['sources_processed']} sources, "
         f"{stats['concepts_generated']} concepts, "
+        f"{stats['entities_created']} entities, "
         f"{stats['tags_normalized']} tags normalized.",
         err=True,
     )

@@ -6,18 +6,23 @@ import json
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 DEFAULT_MODELS: dict[str, str] = {
-    "fast": "google/gemini-2.5-flash",
-    "strong": "anthropic/claude-sonnet-4-6",
+    "fast": "google/gemini-3-flash-preview",
+    "strong": "google/gemini-3.1-pro-preview",
+    "director": "anthropic/claude-opus-4.6",
 }
 
 CONTEXT_LIMITS: dict[str, int] = {
+    "google/gemini-3-flash-preview": 1_048_576,
+    "google/gemini-3.1-pro-preview": 1_048_576,
     "google/gemini-2.5-flash": 1_048_576,
     "google/gemini-2.5-pro": 1_048_576,
+    "anthropic/claude-opus-4.6": 1_000_000,
     "anthropic/claude-sonnet-4-6": 200_000,
     "anthropic/claude-opus-4-6": 200_000,
     "anthropic/claude-haiku-4-5": 200_000,
@@ -36,6 +41,10 @@ def _load_config(project_dir: Path) -> dict:
 
 
 def _resolve_api_key(project_dir: Path) -> str:
+    # Load .env.local from project dir, then from klore repo root
+    load_dotenv(project_dir / ".env.local", override=False)
+    load_dotenv(Path(__file__).parent.parent / ".env.local", override=False)
+
     key = os.environ.get("OPENROUTER_API_KEY")
     if key:
         return key
@@ -61,7 +70,7 @@ def get_client(project_dir: Path) -> OpenAI:
 
 def get_model(tier: str, project_dir: Path) -> str:
     if tier not in DEFAULT_MODELS:
-        raise ValueError(f"Unknown model tier {tier!r}. Expected 'fast' or 'strong'.")
+        raise ValueError(f"Unknown model tier {tier!r}. Expected 'fast', 'strong', or 'director'.")
 
     config = _load_config(project_dir)
     model_overrides = config.get("model", {})

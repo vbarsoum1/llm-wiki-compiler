@@ -16,13 +16,15 @@ META_DIR = "_meta"
 
 
 class CompileState:
-    """Tracks file hashes, concept-source mappings, and prompt hash."""
+    """Tracks file hashes, concept-source mappings, entity mappings, and prompt hash."""
 
     def __init__(self) -> None:
         self.file_hashes: dict[str, str] = {}
         self.concept_sources: dict[str, list[str]] = {}
+        self.entity_sources: dict[str, list[str]] = {}
         self.prompt_hash: str | None = None
         self.last_compiled: str | None = None
+        self.compilation_count: int = 0
 
     # ── Persistence ──────────────────────────────────────────────
 
@@ -35,8 +37,10 @@ class CompileState:
             data = json.loads(path.read_text("utf-8"))
             state.file_hashes = data.get("file_hashes", {})
             state.concept_sources = data.get("concept_sources", {})
+            state.entity_sources = data.get("entity_sources", {})
             state.prompt_hash = data.get("prompt_hash")
             state.last_compiled = data.get("last_compiled")
+            state.compilation_count = data.get("compilation_count", 0)
         return state
 
     def save(self, wiki_dir: Path) -> None:
@@ -44,11 +48,14 @@ class CompileState:
         meta = wiki_dir / META_DIR
         meta.mkdir(parents=True, exist_ok=True)
         self.last_compiled = datetime.now(timezone.utc).isoformat()
+        self.compilation_count += 1
         data = {
             "file_hashes": self.file_hashes,
             "concept_sources": self.concept_sources,
+            "entity_sources": self.entity_sources,
             "prompt_hash": self.prompt_hash,
             "last_compiled": self.last_compiled,
+            "compilation_count": self.compilation_count,
         }
         (meta / STATE_FILENAME).write_text(
             json.dumps(data, indent=2) + "\n", encoding="utf-8"
@@ -115,5 +122,22 @@ class CompileState:
         return {
             concept
             for concept, sources in self.concept_sources.items()
+            if changed & set(sources)
+        }
+
+    # ── Entity-source mapping ────────────────────────────────────
+
+    def update_entity_sources(
+        self, entity_slug: str, source_slugs: list[str]
+    ) -> None:
+        """Update which sources contribute to an entity."""
+        self.entity_sources[entity_slug] = source_slugs
+
+    def get_affected_entities(self, changed_sources: list[str]) -> set[str]:
+        """Given changed source slugs, return entities that need regeneration."""
+        changed = set(changed_sources)
+        return {
+            entity
+            for entity, sources in self.entity_sources.items()
             if changed & set(sources)
         }

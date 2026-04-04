@@ -2,7 +2,7 @@
   <img src="klore-readme-banner.png" alt="Klore — LLM Knowledge Compiler" width="100%">
 </p>
 
-# Klore — LLM Knowledge Compiler
+# Klore — LLM Wiki Knowledge Compiler
 
 **Raw sources in, living knowledge base out.**
 
@@ -10,14 +10,16 @@ Drop PDFs, articles, and images into a folder. Klore compiles them into a struct
 
 **The thesis:** RAG retrieves fragments. Klore compiles knowledge. With 1M+ token context windows, the compiled wiki IS the index.
 
+Based on [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), extended with a three-tier model architecture where a Director model (Opus) replaces the human editorial role — reading each source deeply, deciding what matters, identifying contradictions, and maintaining a living synthesis.
+
 ## Getting Started
 
 ### 1. Install
 
 ```bash
 # Clone the repo
-git clone https://github.com/vbarsoum1/klore.git
-cd klore
+git clone https://github.com/vbarsoum1/llm-wiki.git
+cd llm-wiki
 
 # Create a virtual environment and install
 python3 -m venv .venv
@@ -103,15 +105,29 @@ klore diff --since 1w  # see what changed in the wiki this week
 
 ## How it works
 
-Klore runs a three-pass compiler:
+Klore runs a director-driven compilation pipeline with three model tiers:
 
-1. **Pass 1 — Source Extraction** (fast model, concurrent): Each raw source is converted to markdown and summarized by an LLM. Output: `wiki/sources/*.md` with titles, summaries, key claims, concept tags, and provenance links back to the raw file.
+| Tier | Default Model | Role |
+|------|--------------|------|
+| **Director** | `anthropic/claude-opus-4.6` | Editorial judgment — reads sources, decides what matters, reviews quality, maintains the living synthesis |
+| **Strong** | `google/gemini-3.1-pro-preview` | Concept synthesis, entity pages, Q&A answers |
+| **Fast** | `google/gemini-3-flash-preview` | Source extraction, tag normalization |
 
-2. **Tag Normalization**: Synonym tags are merged into canonical forms ("ML" → "machine-learning"). Prevents concept fragmentation.
+### The compilation pipeline
 
-3. **Pass 2 — Concept Synthesis** (strong model, concurrent): For each concept that appears in 2+ sources, the LLM synthesizes a concept article that cross-references all contributing sources. Output: `wiki/concepts/*.md`.
+1. **Extract** (fast, concurrent): Each raw source is converted to markdown.
 
-4. **Pass 3 — Index Generation** (strong model): Master index, concept index, source index, and a link graph are generated. Output: `wiki/INDEX.md`, `wiki/_meta/link-graph.json`.
+2. **Editorial Brief** (director): The Director reads each source against the current wiki state and produces an editorial brief — what's important, what contradicts existing knowledge, what entities and concepts to create or update.
+
+3. **Tag Normalization** (fast): Synonym tags merged into canonical forms.
+
+4. **Build** (strong, concurrent): Source summaries, concept articles, and entity pages are written, guided by the Director's editorial briefs.
+
+5. **Review** (director): The Director reviews the changes for quality and accuracy.
+
+6. **Index & Log**: A single master index is generated. Every operation is appended to `wiki/log.md`.
+
+7. **Overview** (director): The Director updates `wiki/overview.md` — a living synthesis of the entire knowledge base.
 
 The wiki is Obsidian-compatible out of the box — `[[wikilinks]]`, backlinks, and graph view all work.
 
@@ -136,13 +152,15 @@ Klore uses [OpenRouter](https://openrouter.ai) for model-agnostic LLM access. On
 
 | Tier | Default Model | Used for |
 |------|--------------|----------|
-| Fast | `google/gemini-2.5-flash` | Source extraction, tag normalization |
-| Strong | `anthropic/claude-sonnet-4-6` | Concept synthesis, Q&A, linting |
+| Director | `anthropic/claude-opus-4.6` | Editorial judgment, quality review, overview synthesis |
+| Strong | `google/gemini-3.1-pro-preview` | Concept synthesis, entity pages, Q&A, linting |
+| Fast | `google/gemini-3-flash-preview` | Source extraction, tag normalization |
 
 Override models:
 ```bash
-klore config set model.fast google/gemini-2.5-pro
+klore config set model.director anthropic/claude-sonnet-4-6
 klore config set model.strong openai/gpt-4o
+klore config set model.fast google/gemini-2.5-flash
 ```
 
 ## Architecture
@@ -154,11 +172,14 @@ my-research/
 │   ├── article.md
 │   └── diagram.png
 ├── wiki/                    # Compiled output (Obsidian-compatible)
-│   ├── INDEX.md             # Master index
-│   ├── concepts/            # Synthesized concept articles
+│   ├── index.md             # Master catalog (no wikilinks — navigation only)
+│   ├── log.md               # Append-only chronological record of all operations
+│   ├── overview.md          # Living synthesis — Director-maintained thesis
 │   ├── sources/             # Per-source summaries
-│   ├── reports/             # Saved Q&A answers
-│   └── _meta/               # Compilation state, link graph
+│   ├── concepts/            # Synthesized concept articles (2+ sources)
+│   ├── entities/            # Named entity pages (people, orgs, tech)
+│   ├── reports/             # Filed Q&A answers (feed back into wiki)
+│   └── _meta/               # Compilation state, link graph, lint reports
 ├── .klore/
 │   ├── config.json          # Model and API configuration
 │   └── agents.md            # Wiki schema — controls how sources are compiled (editable)
@@ -167,7 +188,13 @@ my-research/
 
 ## Key design decisions
 
+- **Director-driven.** A frontier model (Opus) plays the editorial role — deciding what matters, what contradicts, and what to investigate next. This replaces the human-in-the-loop from Karpathy's original pattern.
 - **No vector database.** No embeddings. No RAG. The compiled wiki is loaded directly into the LLM's context window.
+- **Index-first queries.** Q&A reads the index to find relevant pages, then drills in — instead of loading everything. Scales to hundreds of sources.
+- **Entity pages.** Named entities (people, orgs, technologies) get their own pages alongside concept articles, creating a rich relational graph.
+- **Living synthesis.** `wiki/overview.md` is a continuously updated thesis about what the knowledge base means, taken as a whole.
+- **Chronological log.** Every operation is logged in `wiki/log.md` — parseable with `grep "^## \[" log.md`.
+- **Reports compound.** Q&A answers filed back into the wiki update concept and entity pages — knowledge compounds.
 - **Obsidian-native.** The wiki is a folder of `.md` files with `[[wikilinks]]`. Open it in Obsidian for graph view, backlinks, and search.
 - **Incremental compilation.** Only new or changed sources are reprocessed. Prompt changes trigger automatic full recompile.
 - **Git-tracked.** Every compilation auto-commits the wiki. `klore diff` shows how your knowledge base evolved.
@@ -175,7 +202,7 @@ my-research/
 
 ## Inspired by
 
-[Andrej Karpathy's description](https://karpathy.ai) of his personal LLM-powered knowledge base workflow.
+[Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — extended with autonomous editorial judgment via a three-tier model architecture.
 
 ## License
 

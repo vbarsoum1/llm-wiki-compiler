@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "klore contributors" }]
-keywords = ["llm", "knowledge-base", "wiki", "compiler", "obsidian"]
+keywords = ["llm", "llm-wiki", "knowledge-base", "wiki", "compiler", "obsidian", "karpathy"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -21,6 +21,7 @@ dependencies = [
     "click>=8.0",
     "openai>=1.0",
     "markitdown[all]>=0.1",
+    "python-dotenv>=1.0",
     "pyyaml>=6.0",
 ]
 
@@ -28,4 +29,4 @@ dependencies = [
 klore = "klore.cli:cli"
 
 [project.urls]
-Homepage = "https://github.com/klore-kb/klore"
+Homepage = "https://github.com/vbarsoum1/llm-wiki"

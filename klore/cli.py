@@ -54,8 +54,20 @@ def init(name: str):
     wiki_dir.mkdir(exist_ok=True)
     (wiki_dir / "sources").mkdir(exist_ok=True)
     (wiki_dir / "concepts").mkdir(exist_ok=True)
+    (wiki_dir / "entities").mkdir(exist_ok=True)
     (wiki_dir / "reports").mkdir(exist_ok=True)
     (wiki_dir / "_meta").mkdir(exist_ok=True)
+
+    # Create log.md and overview.md if they don't exist
+    log_path = wiki_dir / "log.md"
+    if not log_path.exists():
+        log_path.write_text("# Log\n", encoding="utf-8")
+    overview_path = wiki_dir / "overview.md"
+    if not overview_path.exists():
+        overview_path.write_text(
+            "# Overview\n\n*No sources compiled yet.*\n",
+            encoding="utf-8",
+        )
 
     # Create .klore/ config dir and copy agents.md template
     config_dir = project_dir / ".klore"
@@ -71,8 +83,9 @@ def init(name: str):
             json.dumps(
                 {
                     "model": {
-                        "fast": "google/gemini-2.5-flash",
-                        "strong": "anthropic/claude-sonnet-4-6",
+                        "fast": "google/gemini-3-flash-preview",
+                        "strong": "google/gemini-3.1-pro-preview",
+                        "director": "anthropic/claude-opus-4.6",
                     },
                     "api_key": None,
                 },
@@ -90,7 +103,8 @@ def init(name: str):
     click.echo(f"Initialized klore knowledge base at {project_dir}")
     click.echo(f"  raw/          — drop your source files here")
     click.echo(f"  wiki/         — compiled output (Obsidian-compatible)")
-    click.echo(f"  .klore/       — configuration")
+    click.echo(f"  wiki/log.md   — chronological record of all operations")
+    click.echo(f"  .klore/       — configuration & schema")
     click.echo(f"\nNext: klore add <file-or-url>, then klore compile")
 
 
@@ -134,13 +148,14 @@ def compile(full: bool):
     stats = asyncio.run(compile_wiki(project_dir, full=full))
 
     click.echo(f"\nCompilation complete:")
-    click.echo(f"  Sources processed: {stats['sources_processed']}")
+    click.echo(f"  Sources processed:  {stats['sources_processed']}")
     click.echo(f"  Concepts generated: {stats['concepts_generated']}")
-    click.echo(f"  Tags normalized: {stats['tags_normalized']}")
+    click.echo(f"  Entities created:   {stats.get('entities_created', 0)}")
+    click.echo(f"  Tags normalized:    {stats['tags_normalized']}")
     if stats.get("pass1_skipped"):
-        click.echo(f"  Sources skipped (unchanged): {stats['pass1_skipped']}")
+        click.echo(f"  Sources skipped:    {stats['pass1_skipped']}")
     if stats.get("pass1_errors"):
-        click.echo(f"  Sources with errors: {stats['pass1_errors']}")
+        click.echo(f"  Errors:             {stats['pass1_errors']}")
 
 
 @cli.command()
@@ -157,7 +172,7 @@ def ask(question: str, save: bool):
 
     from klore.asker import ask as do_ask
 
-    answer = do_ask(project_dir, question, save=save)
+    answer = asyncio.run(do_ask(project_dir, question, save=save))
     click.echo(answer)
 
     if save:
@@ -171,7 +186,7 @@ def lint():
 
     from klore.linter import lint as do_lint
 
-    report = do_lint(project_dir)
+    report = asyncio.run(do_lint(project_dir))
     click.echo(report)
 
 
@@ -199,8 +214,11 @@ def status():
 
     source_files = [f for f in raw_dir.rglob("*") if f.is_file()]
     source_summaries = list((wiki_dir / "sources").glob("*.md"))
-    concept_articles = list((wiki_dir / "concepts").glob("*.md"))
-    concept_articles = [c for c in concept_articles if c.name != "INDEX.md"]
+    concept_articles = [
+        c for c in (wiki_dir / "concepts").glob("*.md")
+        if c.name != "INDEX.md"
+    ]
+    entity_pages = list((wiki_dir / "entities").glob("*.md"))
     reports = list((wiki_dir / "reports").glob("*.md"))
 
     from klore.state import CompileState
@@ -208,11 +226,12 @@ def status():
     state = CompileState.load(wiki_dir)
 
     click.echo(f"Klore Knowledge Base: {project_dir.name}")
-    click.echo(f"  Raw sources:      {len(source_files)}")
-    click.echo(f"  Source summaries:  {len(source_summaries)}")
-    click.echo(f"  Concept articles:  {len(concept_articles)}")
-    click.echo(f"  Reports:          {len(reports)}")
-    click.echo(f"  Last compiled:    {state.last_compiled or 'never'}")
+    click.echo(f"  Raw sources:       {len(source_files)}")
+    click.echo(f"  Source summaries:   {len(source_summaries)}")
+    click.echo(f"  Concept articles:   {len(concept_articles)}")
+    click.echo(f"  Entity pages:       {len(entity_pages)}")
+    click.echo(f"  Reports:            {len(reports)}")
+    click.echo(f"  Last compiled:      {state.last_compiled or 'never'}")
 
     # Check for uncompiled sources
     if state.file_hashes:
