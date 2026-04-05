@@ -6,7 +6,7 @@
 
 > An implementation of [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), with autonomous editorial judgment.
 
-**Raw sources in, living knowledge base out.**
+**Raw sources in, living knowledge base out.** Available as a standalone CLI or a **Claude Code plugin**.
 
 Drop PDFs, articles, and images into a folder. Klore compiles them into a structured, interlinked Obsidian-compatible wiki — then answers your questions using the compiled knowledge, not retrieved fragments.
 
@@ -16,16 +16,28 @@ Based on [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/4
 
 ## Getting Started
 
-### 1. Install
+### Option A: Claude Code Plugin (recommended)
 
 ```bash
-# Clone the repo
+git clone https://github.com/vbarsoum1/llm-wiki-compiler.git
+pip install ./llm-wiki-compiler
+claude plugin install ./llm-wiki-compiler/klore/plugin
+```
+
+Then in Claude Code:
+```
+/wiki-init                    # Initialize a knowledge base
+/wiki-ingest paper.pdf        # Add a source and compile
+/wiki-ask "What are the key findings?"
+```
+
+The plugin auto-injects your wiki's index into every Claude Code session. Your knowledge base becomes ambient context.
+
+### Option B: Standalone CLI
+
+```bash
 git clone https://github.com/vbarsoum1/llm-wiki-compiler.git
 cd llm-wiki-compiler
-
-# Create a virtual environment and install
-python3 -m venv .venv
-source .venv/bin/activate
 pip install -e .
 ```
 
