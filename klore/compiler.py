@@ -23,7 +23,12 @@ import yaml
 
 from klore.git import git_add_and_commit
 from klore.hash import hash_file, hash_string
-from klore.ingester import IngestionError, convert_to_markdown, slugify
+from klore.ingester import (
+    IngestionError,
+    chunk_large_document,
+    convert_to_markdown,
+    slugify,
+)
 from klore.log import append_log, read_recent_log
 from klore.models import get_client, get_model
 from klore.state import CompileState
@@ -274,10 +279,11 @@ async def _extract_source(
     file_path: Path,
     project_dir: Path,
     semaphore: asyncio.Semaphore,
-) -> dict[str, Any] | None:
-    """Convert a single source file to markdown.
+) -> list[dict[str, Any]]:
+    """Convert a single source file to markdown, chunking large documents.
 
-    Returns a dict with {filename, content, rel_path, file_path} or None on error.
+    Returns a list of extraction dicts. Usually one item, but large documents
+    are split into chapter-sized chunks, each returned as a separate extraction.
     """
     async with semaphore:
         rel_path = str(file_path.relative_to(project_dir))
@@ -287,14 +293,42 @@ async def _extract_source(
             content = await asyncio.to_thread(convert_to_markdown, file_path)
         except IngestionError as exc:
             click.echo(f"  warning: skipping {filename}: {exc}", err=True)
-            return None
+            return []
 
-        return {
-            "filename": filename,
-            "content": content,
-            "rel_path": rel_path,
-            "file_path": file_path,
-        }
+        # Check if this document needs chunking
+        chunks = chunk_large_document(content, filename)
+
+        if chunks is None:
+            # Normal-sized document
+            return [{
+                "filename": filename,
+                "content": content,
+                "rel_path": rel_path,
+                "file_path": file_path,
+            }]
+
+        # Large document — return one extraction per chunk
+        stem = file_path.stem
+        click.echo(
+            f"  {filename}: large document ({len(content.split()):,} words), "
+            f"splitting into {len(chunks)} chapters",
+            err=True,
+        )
+        extractions = []
+        for i, (heading, chunk_content) in enumerate(chunks, 1):
+            chunk_filename = f"{stem} — {heading}"
+            extractions.append({
+                "filename": chunk_filename,
+                "content": chunk_content,
+                "rel_path": rel_path,
+                "file_path": file_path,
+                "chunk_index": i,
+                "chunk_total": len(chunks),
+                "chunk_heading": heading,
+                "parent_filename": filename,
+            })
+
+        return extractions
 
 
 async def _step1_extract(
@@ -323,8 +357,14 @@ async def _step1_extract(
     tasks = [_extract_source(src, project_dir, semaphore) for src in sources]
     results = await asyncio.gather(*tasks)
 
-    extractions = [r for r in results if r is not None]
-    errors = sum(1 for r in results if r is None)
+    # Flatten: each source returns a list (usually 1 item, more if chunked)
+    extractions: list[dict[str, Any]] = []
+    errors = 0
+    for result in results:
+        if result:
+            extractions.extend(result)
+        else:
+            errors += 1
 
     click.echo(
         f"Step 1 (Extract): done — {len(extractions)} extracted, {errors} errors.",
@@ -578,11 +618,14 @@ async def _build_source_summary(
                 return False
 
         # Write atomically to wiki/sources/{slug}.md
-        slug = slugify(file_path.stem)
+        # For chunked documents, use the chunk filename for a unique slug
+        slug = slugify(extraction.get("parent_filename", filename).rsplit(".", 1)[0])
+        if "chunk_index" in extraction:
+            slug = f"{slug}-ch{extraction['chunk_index']:02d}"
         dest = wiki_dir / "sources" / f"{slug}.md"
         _atomic_write(dest, _strip_code_fences(output))
 
-        # Update state
+        # Update state (hash by physical file path, not chunk)
         file_hash = await asyncio.to_thread(hash_file, file_path)
         state.update_hash(extraction["rel_path"], file_hash)
 
