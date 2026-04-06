@@ -11,7 +11,7 @@ This index is a navigational catalog — it helps readers and the LLM find relev
 Generate the master index for this wiki.
 
 Requirements:
-- Do NOT use [[wikilinks]] — use plain text names. The index is for reading and navigation, not for graph links.
+- Use [[wikilinks]] for every page reference — e.g. `[[concept-slug]]`, `[[entity-slug]]`, `[[source-slug]]`
 - Group concepts by their primary theme
 - List sources chronologically (newest first)
 - List entities by type (people, organizations, technologies)
@@ -44,18 +44,18 @@ Format:
 
 ## Concepts
 ### {Theme}
-- concept-slug — one-line description
+- [[concept-slug]] — one-line description
 
 ## Entities
 ### People
-- entity-slug — one-line description
+- [[entity-slug]] — one-line description
 ### Organizations
-- entity-slug — one-line description
+- [[entity-slug]] — one-line description
 ### Technologies
-- entity-slug — one-line description
+- [[entity-slug]] — one-line description
 
 ## Sources
-- source-slug — title (date)
+- [[source-slug]] — title (date)
 
 ## Reports
-- report-slug — question asked (date)
+- [[report-slug]] — question asked (date)

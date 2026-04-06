@@ -14,11 +14,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_MODELS: dict[str, str] = {
     "fast": "google/gemini-3-flash-preview",
     "strong": "google/gemini-3.1-pro-preview",
-    "director": "anthropic/claude-opus-4.6",
+    "director": "google/gemini-3-flash-preview:thinking",
 }
 
 CONTEXT_LIMITS: dict[str, int] = {
     "google/gemini-3-flash-preview": 1_048_576,
+    "google/gemini-3-flash-preview:thinking": 1_048_576,
     "google/gemini-3.1-pro-preview": 1_048_576,
     "google/gemini-2.5-flash": 1_048_576,
     "google/gemini-2.5-pro": 1_048_576,

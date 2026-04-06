@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -245,18 +246,28 @@ def _llm_call_sync(
     system_prompt: str,
     user_prompt: str,
     tracker: _TokenTracker | None = None,
+    _max_retries: int = 3,
 ) -> str:
-    """Synchronous LLM call via the OpenAI SDK."""
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    if tracker and hasattr(response, 'usage'):
-        tracker.add(response.usage)
-    return response.choices[0].message.content or ""
+    """Synchronous LLM call via the OpenAI SDK with retry on transient failures."""
+    for attempt in range(_max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            if tracker and hasattr(response, 'usage'):
+                tracker.add(response.usage)
+            if not response.choices:
+                raise RuntimeError(f"LLM returned empty response for model {model}")
+            return response.choices[0].message.content or ""
+        except Exception:
+            if attempt == _max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+    raise RuntimeError("unreachable")
 
 
 async def _llm_call(
