@@ -8,22 +8,32 @@ if ! command -v python3 &>/dev/null; then
   exit 1
 fi
 
-# Check if klore is available on PATH or in a venv
+# Check if klore is available on PATH
 if command -v klore &>/dev/null; then
-  : # klore found on PATH, good to go
+  : # found
+elif [ -x "$HOME/.klore-venv/bin/klore" ]; then
+  # Found in standard klore venv
+  export PATH="$HOME/.klore-venv/bin:$PATH"
 elif python3 -c "import klore" &>/dev/null; then
-  : # klore importable, use python3 -m klore
   klore() { python3 -m klore "$@"; }
 else
-  echo "klore is not installed." >&2
-  echo "" >&2
-  echo "Install with one of:" >&2
-  echo "  pipx install klore              (recommended, if pipx is available)" >&2
-  echo "  pip install klore               (if no PEP 668 restrictions)" >&2
-  echo "  python3 -m venv ~/.klore-venv && ~/.klore-venv/bin/pip install klore" >&2
-  echo "    then add ~/.klore-venv/bin to your PATH" >&2
-  echo "" >&2
-  echo "Or install from source:" >&2
-  echo "  pip install /path/to/klore-repo" >&2
-  exit 1
+  # Auto-install into a dedicated venv
+  echo "klore not found. Installing..." >&2
+  python3 -m venv "$HOME/.klore-venv" 2>/dev/null
+  if [ $? -eq 0 ]; then
+    "$HOME/.klore-venv/bin/pip" install --quiet klore 2>/dev/null
+    if [ $? -eq 0 ]; then
+      export PATH="$HOME/.klore-venv/bin:$PATH"
+      echo "Installed klore to ~/.klore-venv" >&2
+    else
+      echo "Failed to install klore from PyPI. Install manually:" >&2
+      echo "  pip install klore" >&2
+      exit 1
+    fi
+  else
+    echo "Could not create venv. Install klore manually:" >&2
+    echo "  pipx install klore" >&2
+    echo "  pip install klore" >&2
+    exit 1
+  fi
 fi

@@ -79,19 +79,27 @@ def init(name: str):
         agents_dest.write_text(template.read_text("utf-8"), encoding="utf-8")
     config_path = config_dir / "config.json"
     if not config_path.exists():
-        config_path.write_text(
-            json.dumps(
-                {
-                    "model": {
-                        "fast": "google/gemini-3-flash-preview",
-                        "strong": "google/gemini-3.1-pro-preview",
-                        "director": "anthropic/claude-opus-4.6",
-                    },
-                    "api_key": None,
-                },
-                indent=2,
+        from klore.models import DEFAULT_MODELS
+
+        config_data: dict = {
+            "model": dict(DEFAULT_MODELS),
+            "api_key": None,
+        }
+
+        # Prompt for API key if running interactively
+        if sys.stdin.isatty():
+            click.echo("")
+            key = click.prompt(
+                "OpenRouter API key (get one at https://openrouter.ai/keys)\n"
+                "  Paste key or press Enter to skip",
+                default="",
+                show_default=False,
             )
-            + "\n",
+            if key.strip():
+                config_data["api_key"] = key.strip()
+
+        config_path.write_text(
+            json.dumps(config_data, indent=2) + "\n",
             encoding="utf-8",
         )
 
@@ -100,11 +108,14 @@ def init(name: str):
 
     git_init(project_dir)
 
-    click.echo(f"Initialized klore knowledge base at {project_dir}")
+    click.echo(f"\nInitialized klore knowledge base at {project_dir}")
     click.echo(f"  raw/          — drop your source files here")
     click.echo(f"  wiki/         — compiled output (Obsidian-compatible)")
     click.echo(f"  wiki/log.md   — chronological record of all operations")
     click.echo(f"  .klore/       — configuration & schema")
+    if not config_data.get("api_key"):
+        click.echo(f"\n  Set your API key: klore config set api_key sk-or-v1-...")
+        click.echo(f"  Get one at: https://openrouter.ai/keys")
     click.echo(f"\nNext: klore add <file-or-url>, then klore compile")
 
 
@@ -150,6 +161,15 @@ def ingest(source: str):
         path = ingest_file(source_path, raw_dir)
         click.echo(f"Added {source_path.name} → {path.relative_to(project_dir)}")
 
+    # Pre-flight: check API key
+    from klore.models import get_client
+
+    try:
+        get_client(project_dir)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
     # Compile incrementally
     from klore.compiler import compile_wiki
 
@@ -176,6 +196,44 @@ def compile(full: bool, topic: str | None):
         if not sources:
             click.echo("No sources found in raw/. Add some with `klore add`.", err=True)
             sys.exit(1)
+
+    # Pre-flight checks: API key and model validity
+    from klore.models import get_client, get_model
+
+    try:
+        client = get_client(project_dir)
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Validate models with a tiny test call
+    for tier in ("fast", "strong", "director"):
+        model = get_model(tier, project_dir)
+        try:
+            client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+            )
+        except Exception as e:
+            err_str = str(e)
+            if "404" in err_str or "not found" in err_str.lower():
+                click.echo(
+                    f"Error: {tier} model '{model}' not found on OpenRouter.\n"
+                    f"Check available models at https://openrouter.ai/models\n"
+                    f"Fix: klore config set model.{tier} <valid-model-id>",
+                    err=True,
+                )
+                sys.exit(1)
+            elif "401" in err_str or "auth" in err_str.lower():
+                click.echo(
+                    f"Error: OpenRouter API key is invalid or expired.\n"
+                    f"Get a new key at: https://openrouter.ai/keys",
+                    err=True,
+                )
+                sys.exit(1)
+            # Other errors (rate limits, etc.) — let compile handle them
+            break
 
     from klore.compiler import compile_wiki
 
