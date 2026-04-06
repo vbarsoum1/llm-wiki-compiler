@@ -1,7 +1,7 @@
 ---
-description: Generate a long-form, eloquent article from the compiled wiki. Use when the user wants polished writing — not research bullets — grounded in their knowledge base.
+description: Generate a long-form article from the compiled wiki
 argument-hint: <topic or question>
-allowed-tools: [Bash, Read, Grep, Glob, Agent, Write]
+allowed-tools: [Bash]
 ---
 
 # Long-Form Article Generator
