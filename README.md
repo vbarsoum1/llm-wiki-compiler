@@ -102,14 +102,14 @@ Klore gives coding agents persistent project memory made from your sources, not 
 
 | Agent | Setup | How it works |
 |-------|-------|-------------|
-| **[Claude Code](https://claude.ai/code)** | `claude plugin marketplace add ./klore/plugin && claude plugin install klore` | `/wiki-init`, `/wiki-compile`, `/wiki-ask` slash commands + SessionStart hook |
+| **[Claude Code](https://claude.ai/code)** | `claude plugin marketplace add ./klore/plugin && claude plugin install klore` | `/wiki-init`, `/wiki-compile`, `/wiki-ask`, `/wiki-longform` slash commands + SessionStart hook |
 | **[Cursor](https://cursor.com)** | Open project in Cursor | Auto-loads `.cursor/rules/klore.mdc` |
 | **[Windsurf](https://windsurf.com)** | Open project in Windsurf | Auto-loads `.windsurf/rules/klore.md` via Cascade |
 | **[Codex (OpenAI)](https://openai.com/codex)** | Open project with Codex | Auto-loads `AGENTS.md` |
 | **[Gemini (Google)](https://aistudio.google.com)** | Open project with Gemini | Auto-loads `GEMINI.md` |
 | **[GitHub Copilot](https://github.com/features/copilot)** | Works automatically | Reads `.github/copilot-instructions.md` |
 
-After setup, your agent can run klore commands directly. In Claude Code, use `/wiki-*` slash commands. In other agents, ask: "compile the wiki" or "ingest this article".
+After setup, your agent can run klore commands directly. In Claude Code, use `/wiki-*` slash commands, including `/wiki-longform` for publication-ready articles grounded in the compiled wiki. In other agents, ask: "compile the wiki" or "ingest this article".
 
 The Claude Code plugin also injects your wiki's index into every session via a SessionStart hook, so your knowledge base becomes ambient context.
 
