@@ -172,6 +172,16 @@ class TestGit:
         assert "No changes found." in result.output
 
 
+class TestLongformCommand:
+
+    def test_longform_command_is_registered(self):
+        runner = CliRunner()
+        result = runner.invoke(cli, ["--help"])
+
+        assert result.exit_code == 0
+        assert "longform" in result.output
+
+
 class TestPlugin:
     """Tests that the Claude Code plugin structure is valid."""
 

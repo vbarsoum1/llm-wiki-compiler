@@ -159,6 +159,14 @@ ASK_RESPONSE = (
     "that data-driven approaches are superior."
 )
 
+LONGFORM_RESPONSE = """\
+# Why Transformers Changed Sequence Modeling
+
+Transformers matter because the compiled wiki shows they outperformed RNNs on
+sequence tasks while fitting into the broader machine-learning shift toward
+data-driven approaches.
+"""
+
 # Second source for incremental compile tests
 SOURCE_SUMMARY_RESPONSE_2 = """\
 ---
@@ -284,6 +292,15 @@ def _asker_keywords() -> dict[str, str]:
         "plan how to answer": QUERY_PLAN_RESPONSE,
         # Answer synthesis
         "knowledge base assistant": ASK_RESPONSE,
+    }
+
+
+def _longform_keywords() -> dict[str, str]:
+    """Return the keyword -> response mapping for long-form generation."""
+    return {
+        "plan how to answer": QUERY_PLAN_RESPONSE,
+        "knowledge base assistant": ASK_RESPONSE,
+        "long-form writer": LONGFORM_RESPONSE,
     }
 
 
@@ -613,3 +630,34 @@ class TestAsk:
         assert "tags:" in content
         assert '"machine-learning"' in content
         assert "related_pages:" in content
+
+
+class TestLongform:
+    """Tests for long-form article generation."""
+
+    def test_longform_creates_report(
+        self, compiled_project: tuple[Path, MagicMock]
+    ) -> None:
+        project_dir, _ = compiled_project
+        longform_client = _make_mock_client(_longform_keywords())
+
+        from klore.longform import longform
+
+        with (
+            patch("klore.asker.get_client", return_value=longform_client),
+            patch("klore.asker.get_model", side_effect=_fake_get_model),
+            patch("klore.longform.get_client", return_value=longform_client),
+            patch("klore.longform.get_model", side_effect=_fake_get_model),
+            patch("klore.longform.git_add_and_commit"),
+        ):
+            path = asyncio.run(
+                longform(project_dir, "Why did transformers matter?")
+            )
+
+        assert path.name == "why-did-transformers-matter-longform.md"
+        assert path.is_file()
+        content = path.read_text("utf-8")
+        assert "type: longform" in content
+        assert '"machine-learning"' in content
+        assert "sources/test-paper" in content
+        assert "Why Transformers Changed Sequence Modeling" in content

@@ -124,6 +124,7 @@ klore compile --full         # Force full recompilation
 klore compile --topic <name> # Recompile a specific concept only
 klore ask "question"         # Ask a question against the wiki
 klore ask --save "question"  # Ask and save the answer as a wiki report
+klore longform "topic"       # Generate a grounded long-form article
 klore watch                  # Watch raw/ for changes and auto-compile
 klore lint                   # Run health checks (contradictions, broken links)
 klore diff [--since 2w]      # Show wiki changes over time

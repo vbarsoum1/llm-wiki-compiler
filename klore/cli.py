@@ -335,6 +335,29 @@ def ask(question: tuple[str, ...], save: bool):
         click.echo("\n(Answer saved to wiki/reports/)", err=True)
 
 
+@cli.command(context_settings={"ignore_unknown_options": True})
+@click.argument("topic", nargs=-1, required=True)
+def longform(topic: tuple[str, ...]):
+    """Generate a long-form article from the compiled wiki."""
+    topic = " ".join(topic)
+    project_dir = _require_project()
+
+    wiki_dir = project_dir / "wiki"
+    if not (wiki_dir / "index.md").is_file():
+        click.echo("No compiled wiki found. Run `klore compile` first.", err=True)
+        sys.exit(1)
+
+    from klore.longform import longform as do_longform
+
+    try:
+        path = asyncio.run(do_longform(project_dir, topic))
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Long-form article saved to {path.relative_to(project_dir)}")
+
+
 @cli.command()
 def lint():
     """Run health checks on the compiled wiki."""
